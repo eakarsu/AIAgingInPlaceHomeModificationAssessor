@@ -29,7 +29,7 @@ const aiRateLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  validate: { xForwardedForHeader: false, ipKeyGenerator: false },
+  validate: false,
   message: { error: 'Too Many Requests', message: 'AI rate limit: max 20 requests per hour.' },
 });
 

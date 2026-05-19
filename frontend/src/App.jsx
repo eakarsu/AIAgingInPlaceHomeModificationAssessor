@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import HomeDetail from './pages/HomeDetail';
 import AssessmentResults from './pages/AssessmentResults';
 import Contractors from './pages/Contractors';
+import CustomViewsPage from './pages/CustomViewsPage';
 
 function ProtectedRoute({ children }) {
   const { isAuthenticated } = useAuth();
@@ -22,6 +23,7 @@ function AppRoutes() {
       <Route path="/homes/:id" element={<ProtectedRoute><HomeDetail /></ProtectedRoute>} />
       <Route path="/assessments/:id" element={<ProtectedRoute><AssessmentResults /></ProtectedRoute>} />
       <Route path="/contractors" element={<ProtectedRoute><Contractors /></ProtectedRoute>} />
+      <Route path="/custom-views" element={<ProtectedRoute><CustomViewsPage /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

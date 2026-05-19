@@ -15,6 +15,7 @@ const aiRoutes = require('./routes/ai');
 const profilesRoutes = require('./routes/profiles');
 const quotesRoutes = require('./routes/quotes');
 const fallRiskRoutes = require('./routes/fallRisk');
+const customViewsRoutes = require('./routes/customViews');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -50,6 +51,7 @@ app.use('/api/ai', aiRateLimiter, aiRoutes);
 app.use('/api/profiles', profilesRoutes);
 app.use('/api/quotes', quotesRoutes);
 app.use('/api/fall-risk-history', fallRiskRoutes);
+app.use('/api/custom-views', customViewsRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not Found', message: `Route ${req.method} ${req.originalUrl} does not exist` });
@@ -79,22 +81,29 @@ const start = async () => {
 start();
 module.exports = app;
 
-// BATCH_00_AUDIT_MOUNTS
-app.use('/api/home-vision', require('./routes/homeVision'));
-app.use('/api/injury-risk', require('./routes/injuryRisk'));
-app.use('/api/contractor-marketplace', require('./routes/contractorMarketplace'));
-app.use('/api/insurance-workflow', require('./routes/insuranceWorkflow'));
-app.use('/api/roi-tracking', require('./routes/roiTracking'));
+// BATCH_00_AUDIT_MOUNTS (defensive: skip any broken sibling route module)
+const safeMount = (path, modulePath) => {
+  try {
+    app.use(path, require(modulePath));
+  } catch (e) {
+    console.warn(`[skip] could not mount ${path} (${modulePath}): ${e.message}`);
+  }
+};
+safeMount('/api/home-vision', './routes/homeVision');
+safeMount('/api/injury-risk', './routes/injuryRisk');
+safeMount('/api/contractor-marketplace', './routes/contractorMarketplace');
+safeMount('/api/insurance-workflow', './routes/insuranceWorkflow');
+safeMount('/api/roi-tracking', './routes/roiTracking');
 
 // === Batch 00 Gaps & Frontend Mounts ===
-app.use('/api/gap-limited-ai-fall-risk-prediction', require('./routes/gap_limited_ai_fall_risk_prediction'));
-app.use('/api/gap-ai-contractor-matching-skill-plus', require('./routes/gap_ai_contractor_matching_skill_plus'));
-app.use('/api/gap-ai-cost-estimation-pipeline-material', require('./routes/gap_ai_cost_estimation_pipeline_material'));
-app.use('/api/gap-ai-accessibility-score-generation', require('./routes/gap_ai_accessibility_score_generation'));
-app.use('/api/gap-ai-roi-modeling-cost-vs', require('./routes/gap_ai_roi_modeling_cost_vs'));
-app.use('/api/gap-photo-upload-image-based-home', require('./routes/gap_photo_upload_image_based_home'));
-app.use('/api/gap-contractor-collaboration-shared-quote-review', require('./routes/gap_contractor_collaboration_shared_quote_review'));
-app.use('/api/gap-insurance-claim-documentation-guidance', require('./routes/gap_insurance_claim_documentation_guidance'));
-app.use('/api/gap-post-modification-follow-up-effectiveness', require('./routes/gap_post_modification_follow_up_effectiveness'));
-app.use('/api/gap-notifications-subsystem', require('./routes/gap_notifications_subsystem'));
-app.use('/api/gap-outbound-webhooks', require('./routes/gap_outbound_webhooks'));
+safeMount('/api/gap-limited-ai-fall-risk-prediction', './routes/gap_limited_ai_fall_risk_prediction');
+safeMount('/api/gap-ai-contractor-matching-skill-plus', './routes/gap_ai_contractor_matching_skill_plus');
+safeMount('/api/gap-ai-cost-estimation-pipeline-material', './routes/gap_ai_cost_estimation_pipeline_material');
+safeMount('/api/gap-ai-accessibility-score-generation', './routes/gap_ai_accessibility_score_generation');
+safeMount('/api/gap-ai-roi-modeling-cost-vs', './routes/gap_ai_roi_modeling_cost_vs');
+safeMount('/api/gap-photo-upload-image-based-home', './routes/gap_photo_upload_image_based_home');
+safeMount('/api/gap-contractor-collaboration-shared-quote-review', './routes/gap_contractor_collaboration_shared_quote_review');
+safeMount('/api/gap-insurance-claim-documentation-guidance', './routes/gap_insurance_claim_documentation_guidance');
+safeMount('/api/gap-post-modification-follow-up-effectiveness', './routes/gap_post_modification_follow_up_effectiveness');
+safeMount('/api/gap-notifications-subsystem', './routes/gap_notifications_subsystem');
+safeMount('/api/gap-outbound-webhooks', './routes/gap_outbound_webhooks');
