@@ -52,6 +52,7 @@ app.use('/api/profiles', profilesRoutes);
 app.use('/api/quotes', quotesRoutes);
 app.use('/api/fall-risk-history', fallRiskRoutes);
 app.use('/api/custom-views', customViewsRoutes);
+app.use('/api/evacuation-readiness', require('./routes/evacuationReadiness'));
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not Found', message: `Route ${req.method} ${req.originalUrl} does not exist` });

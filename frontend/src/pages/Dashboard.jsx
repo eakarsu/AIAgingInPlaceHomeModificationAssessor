@@ -91,6 +91,8 @@ export default function Dashboard() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
           <a href="/contractors" onClick={e => { e.preventDefault(); navigate('/contractors'); }} style={{ color: '#667eea', textDecoration: 'none', fontSize: '14px', fontWeight: '500' }}>Find Contractors</a>
+          <a href="/custom-views" onClick={e => { e.preventDefault(); navigate('/custom-views'); }} style={{ color: '#667eea', textDecoration: 'none', fontSize: '14px', fontWeight: '500' }}>Aging Views</a>
+          <a href="/evacuation-readiness" onClick={e => { e.preventDefault(); navigate('/evacuation-readiness'); }} style={{ color: '#667eea', textDecoration: 'none', fontSize: '14px', fontWeight: '500' }}>Evacuation</a>
           <span style={{ color: '#718096', fontSize: '14px' }}>Hello, {user?.name}</span>
           <button style={{ ...s.btn, ...s.btnSecondary, padding: '6px 14px' }} onClick={() => { logout(); navigate('/login'); }}>Sign Out</button>
         </div>
@@ -121,6 +123,7 @@ export default function Dashboard() {
             <button style={{ ...s.btn, ...s.btnPrimary }} onClick={() => setShowAdd(true)}>Add Your First Home</button>
           </div>
         ) : (
+          <>
           <div style={s.grid}>
             {homes.map(home => (
               <div key={home.id} style={s.card} onClick={() => navigate(`/homes/${home.id}`)}
@@ -147,6 +150,7 @@ export default function Dashboard() {
               <button style={{ ...s.btn, ...s.btnSecondary, padding: '6px 14px' }} disabled={page >= pagination.totalPages} onClick={() => setPage(p => p + 1)}>Next →</button>
             </div>
           )}
+          </>
         )}
       </div>
 

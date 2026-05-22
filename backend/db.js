@@ -66,6 +66,21 @@ const initDb = async () => {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS contractors (
+        id                          SERIAL PRIMARY KEY,
+        name                        VARCHAR(255) NOT NULL,
+        specialty                   VARCHAR(100),
+        license_number              VARCHAR(100),
+        phone                       VARCHAR(50),
+        email                       VARCHAR(255),
+        rating                      DECIMAL(3, 2),
+        review_count                INTEGER DEFAULT 0,
+        zip_code                    VARCHAR(20),
+        is_certified_aging_specialist BOOLEAN DEFAULT FALSE
+      )
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS modifications (
         id                  SERIAL PRIMARY KEY,
         assessment_id       INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
@@ -83,21 +98,6 @@ const initDb = async () => {
         start_date          DATE,
         end_date            DATE,
         notes               TEXT
-      )
-    `);
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS contractors (
-        id                          SERIAL PRIMARY KEY,
-        name                        VARCHAR(255) NOT NULL,
-        specialty                   VARCHAR(100),
-        license_number              VARCHAR(100),
-        phone                       VARCHAR(50),
-        email                       VARCHAR(255),
-        rating                      DECIMAL(3, 2),
-        review_count                INTEGER DEFAULT 0,
-        zip_code                    VARCHAR(20),
-        is_certified_aging_specialist BOOLEAN DEFAULT FALSE
       )
     `);
 
