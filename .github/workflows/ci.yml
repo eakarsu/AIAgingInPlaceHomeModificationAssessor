@@ -1,0 +1,56 @@
+name: governed-workflow-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: app_user
+          POSTGRES_PASSWORD: ci-password
+          POSTGRES_DB: app_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app_user -d app_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://app_user:ci-password@localhost:5432/app_db
+      DB_SSL: "false"
+      JWT_SECRET: ci-only-random-secret-at-least-32-characters
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+      - name: Policy and authorization tests
+        working-directory: backend
+        run: npm test
+      - name: Additive migration integration
+        run: ./scripts/migrate.sh
+      - name: Install and build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Launcher syntax
+        run: bash -n start.sh scripts/*.sh
+      - name: Block unsafe launch behavior
+        run: |
+          ! grep -E 'kill -9|pkill|npm install|node .*seed|createdb|DROP DATABASE' start.sh
+
