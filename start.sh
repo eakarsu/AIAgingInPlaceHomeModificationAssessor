@@ -17,9 +17,19 @@ if [[ ! -d backend/node_modules || ! -d frontend/node_modules ]]; then
   exit 1
 fi
 
-(cd backend && npm start) &
+: "${BACKEND_PORT:?BACKEND_PORT is required}"
+: "${FRONTEND_PORT:?FRONTEND_PORT is required}"
+[[ "$BACKEND_PORT" != "$FRONTEND_PORT" ]] || { echo "BACKEND_PORT and FRONTEND_PORT must differ." >&2; exit 1; }
+for runtime_port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
+  if lsof -nP -iTCP:"$runtime_port" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Port $runtime_port is already in use; no process was changed." >&2
+    exit 1
+  fi
+done
+
+(cd backend && PORT="$BACKEND_PORT" npm start) &
 backend_pid=$!
-(cd frontend && npm run dev -- --port "${FRONTEND_PORT:-5173}") &
+(cd frontend && npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort) &
 frontend_pid=$!
 
 cleanup() {
