@@ -56,7 +56,7 @@ export default function Login() {
         <div style={styles.tabs}>
           {['login', 'register'].map(m => (
             <button key={m} style={{ ...styles.tab, ...(mode === m ? styles.tabActive : {}) }} onClick={() => { setMode(m); setError(''); }}>
-              {m === 'login' ? 'Sign In' : 'Register'}
+              {m === 'login' ? 'Existing Account' : 'Register'}
             </button>
           ))}
         </div>
