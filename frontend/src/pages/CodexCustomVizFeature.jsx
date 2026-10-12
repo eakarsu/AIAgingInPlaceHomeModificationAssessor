@@ -1,68 +1,11 @@
-import React from 'react';
-
-const signals = [
-  { label: 'Demand', value: 72, delta: '+12%' },
-  { label: 'Risk', value: 44, delta: '-8%' },
-  { label: 'Capacity', value: 86, delta: '+6%' },
-  { label: 'Quality', value: 63, delta: '+4%' },
-  { label: 'Velocity', value: 58, delta: '+9%' },
-];
-
-const trend = [18, 32, 28, 46, 41, 57, 69, 64, 78, 72, 88, 83];
-const maxTrend = Math.max(...trend);
-const points = trend.map((value, index) => {
-  const x = 28 + index * 42;
-  const y = 172 - (value / maxTrend) * 128;
-  return `${x},${y}`;
-}).join(' ');
-
-function TimelineView() {
-  return (
-    <section style={{ padding: 24, color: '#172033' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-        <div>
-          <p style={{ margin: 0, color: '#64748b', fontSize: 13, fontWeight: 700, textTransform: 'uppercase' }}>Custom visualization</p>
-          <h1 style={{ margin: '6px 0 0', fontSize: 30 }}> AI Aging In Place Home Modification Assessor Insight Map</h1>
-        </div>
-        <div style={{ padding: '10px 14px', border: '1px solid #d7dde8', borderRadius: 8, background: '#f8fafc' }}>Live scenario model</div>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 1.3fr) minmax(260px, .7fr)', gap: 18, marginTop: 20 }}>
-        <div style={{ border: '1px solid #d7dde8', borderRadius: 8, padding: 18, background: '#ffffff' }}>
-          <svg viewBox="0 0 520 220" role="img" aria-label="Custom trend visualization" style={{ width: '100%', height: 260 }}>
-            <rect x="0" y="0" width="520" height="220" rx="8" fill="#f8fafc" />
-            {[44, 76, 108, 140, 172].map((y) => (
-              <line key={y} x1="28" x2="492" y1={y} y2={y} stroke="#e2e8f0" strokeWidth="1" />
-            ))}
-            <polyline points={points} fill="none" stroke="#0f766e" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-            {trend.map((value, index) => {
-              const x = 28 + index * 42;
-              const y = 172 - (value / maxTrend) * 128;
-              return <circle key={index} cx={x} cy={y} r="5" fill="#14b8a6" stroke="#ffffff" strokeWidth="2" />;
-            })}
-            <text x="28" y="204" fill="#64748b" fontSize="12">Start</text>
-            <text x="448" y="204" fill="#64748b" fontSize="12">Current</text>
-          </svg>
-        </div>
-
-        <div style={{ display: 'grid', gap: 12 }}>
-          {signals.map((signal) => (
-            <div key={signal.label} style={{ border: '1px solid #d7dde8', borderRadius: 8, padding: 14, background: '#ffffff' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                <strong>{signal.label}</strong>
-                <span style={{ color: signal.delta.startsWith('+') ? '#047857' : '#b45309' }}>{signal.delta}</span>
-              </div>
-              <div style={{ height: 10, borderRadius: 999, background: '#e2e8f0', overflow: 'hidden' }}>
-                <div style={{ width: `${signal.value}%`, height: '100%', background: '#0f766e' }} />
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-export default function CodexCustomVizFeature() {
-  return <TimelineView />;
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import api from '../api/client';
+import { readRecordList } from '../services/nativeRecords';
+import '../components/AIWorkspace.css';
+export default function CodexCustomVizFeature(){
+ const [snapshot,setSnapshot]=useState(null),[loading,setLoading]=useState(true),[error,setError]=useState('');const active=useRef(null);
+ const load=useCallback(async()=>{active.current?.abort();const controller=new AbortController();active.current=controller;setLoading(true);setError('');try{const [homes,assessments,care]=await Promise.all([api.get('/homes?limit=100',{signal:controller.signal}),api.get('/assessments?limit=100',{signal:controller.signal}),api.get('/care-workflows',{signal:controller.signal})]);const homeRows=readRecordList(homes.data),assessmentRows=readRecordList(assessments.data),careRows=readRecordList(care.data);const count=(response,rows)=>{const total=response.pagination?.total??rows.length;if(!Number.isInteger(Number(total))||Number(total)<0)throw Error('The record service returned an invalid count.');return Number(total);};if(active.current===controller&&!controller.signal.aborted)setSnapshot({homes:count(homes.data,homeRows),assessments:count(assessments.data,assessmentRows),care:careRows.length,pending:assessmentRows.filter(row=>row.status==='pending').length,completed:assessmentRows.filter(row=>row.status==='completed').length,openDrafts:careRows.filter(row=>row.status==='draft').length});}catch(failure){if(active.current===controller&&!controller.signal.aborted)setError(failure.response?.data?.message||failure.message||'Saved record insights could not be loaded.');}finally{if(active.current===controller&&!controller.signal.aborted){active.current=null;setLoading(false);}}},[]);
+ useEffect(()=>{load();return()=>{active.current?.abort();active.current=null;}},[load]);
+ const metrics=snapshot?[['Saved homes',snapshot.homes],['Saved assessments',snapshot.assessments],['Saved care workflows',snapshot.care],['Pending assessments (first 100)',snapshot.pending],['Completed assessments (first 100)',snapshot.completed],['Open care drafts (first 200)',snapshot.openDrafts]]:[];const maximum=Math.max(1,...metrics.map(([,value])=>value));
+ return <main className="ai-workspace"><header className="ai-workspace-heading"><span className="ai-eyebrow">PostgreSQL records</span><h1>Planning Record Insights</h1><p>Current counts from the native records for your signed-in account.</p><button type="button" className="btn btn-secondary" disabled={loading} onClick={load}>Refresh</button></header>{loading?<p role="status">Loading current saved records…</p>:error?<section role="alert" className="native-load-error"><strong>Record insights could not be loaded.</strong><p>{error}</p><button type="button" className="btn btn-secondary" onClick={load}>Retry</button></section>:<section className="ai-workspace-panel" aria-label="Saved record counts">{metrics.map(([label,value])=><div key={label} style={{marginBottom:20}}><div style={{display:'flex',justifyContent:'space-between'}}><strong>{label}</strong><span>{value}</span></div><div style={{background:'#e2e8f0',height:12,borderRadius:8,marginTop:8}}><div style={{background:'#667eea',height:12,width:`${value/maximum*100}%`,borderRadius:8}}/></div></div>)}<p className="ai-muted">Draft counts describe saved planning records. They do not certify accessibility, safety, consent, provider activity, or a completed modification.</p></section>}</main>;
 }

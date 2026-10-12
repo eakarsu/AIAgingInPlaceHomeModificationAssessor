@@ -81,7 +81,7 @@ router.post(
       const result = await query(
         `INSERT INTO homes (user_id, address, year_built, sq_footage, num_floors, current_accessibility_score)
          VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-        [req.user.id, address, year_built || null, sq_footage || null, num_floors || 1, current_accessibility_score || 0]
+        [req.user.id, address, year_built || null, sq_footage || null, num_floors || 1, current_accessibility_score ?? null]
       );
       return res.status(201).json({ home: result.rows[0] });
     } catch (err) {
@@ -167,8 +167,8 @@ router.get(
       );
 
       const mods = result.rows;
-      const totalMin = mods.reduce((s, m) => s + (m.estimated_cost_min || 0), 0);
-      const totalMax = mods.reduce((s, m) => s + (m.estimated_cost_max || 0), 0);
+      const totalMin = mods.every(m => m.estimated_cost_min !== null && m.estimated_cost_min !== undefined) ? mods.reduce((sum, m) => sum + Number(m.estimated_cost_min), 0) : null;
+      const totalMax = mods.every(m => m.estimated_cost_max !== null && m.estimated_cost_max !== undefined) ? mods.reduce((sum, m) => sum + Number(m.estimated_cost_max), 0) : null;
 
       return res.json({
         home_id: req.params.id,

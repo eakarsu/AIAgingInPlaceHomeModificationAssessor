@@ -66,6 +66,9 @@ const initDb = async () => {
       )
     `);
 
+    // Separate owner review notes from immutable provider findings and scores.
+    await pool.query('ALTER TABLE assessments ADD COLUMN IF NOT EXISTS review_notes TEXT');
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS contractors (
         id                          SERIAL PRIMARY KEY,
@@ -156,6 +159,7 @@ const initDb = async () => {
     `);
 
     // Add missing columns to existing tables (safe migrations)
+    await pool.query('ALTER TABLE fall_risk_history ADD COLUMN IF NOT EXISTS planning_notes TEXT');
     const alterQueries = [
       `ALTER TABLE homes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
       `ALTER TABLE modifications ADD COLUMN IF NOT EXISTS contractor_id INTEGER REFERENCES contractors(id) ON DELETE SET NULL`,

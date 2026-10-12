@@ -1,22 +1,5 @@
-const express = require('express');
-
-const router = express.Router();
-
-router.get('/', (_req, res) => {
-  res.json({
-    feature: 'Evacuation Readiness',
-    summary: { readinessScore: 74, blockedExits: 2, caregiverGaps: 1, urgentFixes: 3 },
-    zones: [
-      { area: 'Front Entry', issue: 'Threshold lip and no exterior handrail', priority: 'High' },
-      { area: 'Bedroom Hall', issue: 'Night path lighting below target lux', priority: 'Medium' },
-      { area: 'Garage Exit', issue: 'Stored items narrow wheelchair clearance', priority: 'High' },
-    ],
-    actions: [
-      'Clear 36-inch evacuation path from bedroom to primary exit.',
-      'Install battery-backed motion lighting along nighttime route.',
-      'Add emergency contact placard and caregiver access instructions.',
-    ],
-  });
-});
-
-module.exports = router;
+const express=require('express');
+const {query}=require('../db');const {authenticateToken}=require('../middleware/auth');
+const router=express.Router();router.use(authenticateToken);
+router.get('/',async(req,res)=>{try{const result=await query(`SELECT h.id,h.address,a.status AS assessment_status,a.safety_score,a.ai_result FROM homes h LEFT JOIN LATERAL(SELECT status,safety_score,ai_result FROM assessments WHERE home_id=h.id AND user_id=$1 ORDER BY created_at DESC LIMIT 1)a ON TRUE WHERE h.user_id=$1 ORDER BY h.created_at DESC LIMIT 100`,[req.user.id]);res.json({feature:'Evacuation Readiness',scope:'First 100 saved homes for your account',summary:{savedHomes:result.rows.length,completedAssessments:result.rows.filter(row=>row.assessment_status==='completed').length,pendingReview:result.rows.filter(row=>row.assessment_status!=='completed').length},homes:result.rows.map(row=>({id:row.id,address:row.address,assessmentStatus:row.assessment_status||'Not assessed',readinessStatus:'Evacuation readiness requires a specific authorized source review',sourceAssessment:row.assessment_status==='completed'?row.ai_result:null}))});}catch(error){res.status(500).json({error:'Native records unavailable',message:error.message});}});
+module.exports=router;

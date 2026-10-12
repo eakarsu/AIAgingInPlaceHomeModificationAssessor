@@ -105,6 +105,9 @@ for runtime_port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
   fi
 done
 
+node backend/scripts/native-planning.cjs
+node backend/scripts/native-report-planning.cjs
+
 (cd backend && PORT="$BACKEND_PORT" npm start) &
 backend_pid=$!
 (cd frontend && npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort) &

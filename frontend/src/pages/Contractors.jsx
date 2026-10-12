@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
+import { readRecordList } from '../services/nativeRecords';
 
 const s = {
   page: { maxWidth: '1000px', margin: '0 auto', padding: '24px' },
@@ -34,7 +35,7 @@ export default function Contractors() {
   useEffect(() => { loadContractors(zip, specialty, page); }, [page]);
 
   const loadContractors = async (z, sp, p = 1) => {
-    setLoading(true);
+    setLoading(true); setError('');
     try {
       const params = new URLSearchParams();
       if (z || zip) params.set('zip', z || zip);
@@ -42,10 +43,10 @@ export default function Contractors() {
       params.set('page', p);
       params.set('limit', LIMIT);
       const res = await api.get(`/contractors?${params.toString()}`);
-      setContractors(res.data.data || []);
+      setContractors(readRecordList(res.data));
       if (res.data.pagination) setPagination(res.data.pagination);
     } catch (err) {
-      setError('Failed to load contractors');
+      setError(err.response?.data?.message || err.message || 'Contractors could not be loaded.');
     } finally {
       setLoading(false);
     }
@@ -66,7 +67,7 @@ export default function Contractors() {
       <div style={s.page}>
         <div style={{ marginBottom: '24px' }}>
           <h1 style={{ margin: '0 0 4px', fontSize: '26px' }}>Contractor Directory</h1>
-          <p style={{ margin: 0, color: '#718096' }}>Find certified aging-in-place specialists near you</p>
+          <p style={{ margin: 0, color: '#718096' }}>Review contractor records and unverified local planning prospects</p>
         </div>
 
         <form onSubmit={handleSearch} style={s.searchBar}>
@@ -88,6 +89,8 @@ export default function Contractors() {
 
         {loading ? (
           <div style={{ textAlign: 'center', padding: '60px', color: '#718096' }}>Loading contractors...</div>
+        ) : error ? (
+          <section role="alert" style={s.card}><strong>Contractor sources could not be loaded.</strong><p>{error}</p><button type="button" style={{ ...s.btn, ...s.btnSecondary }} onClick={() => loadContractors(zip, specialty, page)}>Retry</button></section>
         ) : contractors.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '60px', color: '#718096', background: '#fff', borderRadius: '12px', boxShadow: '0 1px 4px rgba(0,0,0,0.1)' }}>
             <div style={{ fontSize: '40px', marginBottom: '12px' }}>🔍</div>

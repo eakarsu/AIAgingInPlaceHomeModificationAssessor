@@ -112,6 +112,23 @@ router.post(
   }
 );
 
+// Owner notes never alter clinical scores, generated findings or source IDs.
+router.patch(
+  '/:id', authenticateToken,
+  [param('id').isInt({ min: 1 }).toInt(), body('review_notes').isString().isLength({ max: 10000 })],
+  validate,
+  async (req, res) => {
+    if (Object.keys(req.body).some(key => key !== 'review_notes')) return res.status(400).json({ error: 'Only owner review notes may be edited on a saved assessment.' });
+    try {
+      const result = await query('UPDATE assessments SET review_notes = $1 WHERE id = $2 AND user_id = $3 RETURNING *', [req.body.review_notes, req.params.id, req.user.id]);
+      if (!result.rows.length) return res.status(404).json({ error: 'Assessment not found or access denied' });
+      return res.json({ assessment: result.rows[0] });
+    } catch (err) {
+      return res.status(500).json({ error: 'Internal Server Error', message: err.message });
+    }
+  }
+);
+
 // DELETE /api/assessments/:id
 router.delete(
   '/:id',

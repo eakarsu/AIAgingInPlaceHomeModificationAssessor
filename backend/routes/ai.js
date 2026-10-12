@@ -1,10 +1,12 @@
 const express = require('express');
 const axios = require('axios');
 const { body, query: queryValidator, validationResult } = require('express-validator');
-const { query } = require('../db');
+const { query, pool } = require('../db');
+const persistNativeAI = require('../services/persistNativeAI');
 const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
+router.use(require('../middleware/nativeAICancellation'));
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -28,7 +30,8 @@ function parseAIJson(text) {
 
 const MODEL = 'anthropic/claude-3-5-sonnet-20241022';
 
-const callOpenRouter = async (systemPrompt, userPrompt, model) => {
+const callOpenRouter = async (systemPrompt, userPrompt, model, signal) => {
+  signal?.throwIfAborted();
   const response = await axios.post(
     'https://openrouter.ai/api/v1/chat/completions',
     {
@@ -44,9 +47,11 @@ const callOpenRouter = async (systemPrompt, userPrompt, model) => {
         'Content-Type': 'application/json',
       },
       timeout: 60000,
+      signal,
     }
   );
 
+  signal?.throwIfAborted();
   const text = response.data.choices[0].message.content;
   const parsed = parseAIJson(text);
   if (!parsed) return { raw_response: text };
@@ -54,16 +59,10 @@ const callOpenRouter = async (systemPrompt, userPrompt, model) => {
 };
 
 // Persist AI result to ai_results table
-const persistAIResult = async (userId, homeId, endpoint, result) => {
-  try {
-    await query(
-      `INSERT INTO ai_results (user_id, home_id, endpoint, model, result)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [userId, homeId || null, endpoint, process.env.OPENROUTER_MODEL || MODEL, JSON.stringify(result)]
-    );
-  } catch (err) {
-    console.error('Failed to persist AI result:', err.message);
-  }
+const persistAIResult = async (userId, homeId, endpoint, result, signal, client) => {
+ const write=database=>database.query(`INSERT INTO ai_results (user_id,home_id,endpoint,model,result) VALUES($1,$2,$3,$4,$5)`,[userId,homeId??null,endpoint,process.env.OPENROUTER_MODEL||MODEL,JSON.stringify(result)]);
+ if(client){signal?.throwIfAborted();return write(client);}
+ return persistNativeAI(pool,signal,write);
 };
 
 // POST /api/ai/assess-home
@@ -118,37 +117,40 @@ Home Details:
 - Address: ${home.address}
 - Year Built: ${home.year_built || 'Unknown'}
 - Square Footage: ${home.sq_footage || 'Unknown'} sq ft
-- Number of Floors: ${home.num_floors || 1}
-- Current Accessibility Score: ${home.current_accessibility_score || 0}/100
+- Number of Floors: ${home.num_floors ?? 'Unknown'}
+- Current Accessibility Score: ${home.current_accessibility_score ?? 'Not assessed'}/100
 
 Resident Profile:
 - Age: ${resident_age || profile?.age || 'Not specified'}
-- Mobility Issues: ${mobility_issues || profile?.mobility_issues || 'None reported'}
-- Vision Issues: ${vision_issues || profile?.vision_issues || 'None reported'}
-- Balance Issues: ${balance_issues || profile?.balance_issues || 'None reported'}
-- Medical Notes: ${profile?.medical_notes || 'None'}
+- Mobility Issues: ${mobility_issues || profile?.mobility_issues || 'Unknown'}
+- Vision Issues: ${vision_issues || profile?.vision_issues || 'Unknown'}
+- Balance Issues: ${balance_issues || profile?.balance_issues || 'Unknown'}
+- Medical Notes: ${profile?.medical_notes || 'Unknown'}
 
 Home Description / Photos Notes:
 ${photos_description || 'No additional description provided'}
 
 Provide safety_score (0-100), urgency_level, room_risks for all rooms, top 5 priorities, and immediate actions.`;
 
-      const aiResult = await callOpenRouter(systemPrompt, userPrompt);
+      const aiResult = await callOpenRouter(systemPrompt, userPrompt, undefined, req.aiSignal);
 
+      const assessResult = await persistNativeAI(pool,req.aiSignal,async(client)=>{
       // Create assessment record
-      const assessResult = await query(
+      const assessResult = await client.query(
         `INSERT INTO assessments (home_id, user_id, assessment_type, status, ai_result, safety_score, urgency_level)
          VALUES ($1, $2, 'full', 'completed', $3, $4, $5) RETURNING *`,
-        [home_id, req.user.id, JSON.stringify(aiResult), aiResult.safety_score || null, aiResult.urgency_level || null]
+        [home_id, req.user.id, JSON.stringify(aiResult), aiResult.safety_score ?? null, aiResult.urgency_level || null]
       );
 
       // Update home accessibility score
-      if (aiResult.safety_score) {
-        await query('UPDATE homes SET current_accessibility_score = $1, updated_at = NOW() WHERE id = $2', [aiResult.safety_score, home_id]);
+      if (Number.isFinite(aiResult.safety_score)) {
+        await client.query('UPDATE homes SET current_accessibility_score = $1, updated_at = NOW() WHERE id = $2', [aiResult.safety_score, home_id]);
       }
 
       // Persist to ai_results
-      await persistAIResult(req.user.id, home_id, 'assess-home', aiResult);
+      await persistAIResult(req.user.id, home_id, 'assess-home', aiResult, req.aiSignal,client);
+        return assessResult;
+      });
 
       return res.json({
         assessment: assessResult.rows[0],
@@ -163,6 +165,7 @@ Provide safety_score (0-100), urgency_level, room_risks for all rooms, top 5 pri
         model_used: process.env.OPENROUTER_MODEL || MODEL,
       });
     } catch (err) {
+      if(req.aiSignal?.aborted)return;
       if (err.response) {
         return res.status(502).json({ error: 'AI Service Error', message: 'Failed to get AI response', details: err.response.data });
       }
@@ -225,12 +228,13 @@ ${JSON.stringify(assessment.ai_result, null, 2)}
 
 Generate 8-12 specific modifications with costs, priorities, aging benefits, DIY possibility, and permit requirements.`;
 
-      const aiResult = await callOpenRouter(systemPrompt, userPrompt);
+      const aiResult = await callOpenRouter(systemPrompt, userPrompt, undefined, req.aiSignal);
       const modifications = aiResult.modifications || [];
 
+      const savedMods = await persistNativeAI(pool,req.aiSignal,async(client)=>{
       const savedMods = [];
       for (const mod of modifications) {
-        const modResult = await query(
+        const modResult = await client.query(
           `INSERT INTO modifications (assessment_id, room, modification_type, description, estimated_cost_min, estimated_cost_max, priority, aging_benefit, ai_reasoning, status)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'recommended') RETURNING *`,
           [assessment_id, mod.room, mod.modification_type, mod.description,
@@ -241,7 +245,9 @@ Generate 8-12 specific modifications with costs, priorities, aging benefits, DIY
         savedMods.push(modResult.rows[0]);
       }
 
-      await persistAIResult(req.user.id, assessment.home_id, 'recommend-modifications', aiResult);
+      await persistAIResult(req.user.id, assessment.home_id, 'recommend-modifications', aiResult, req.aiSignal,client);
+        return savedMods;
+      });
 
       return res.json({
         modifications: savedMods,
@@ -249,6 +255,7 @@ Generate 8-12 specific modifications with costs, priorities, aging benefits, DIY
         model_used: process.env.OPENROUTER_MODEL || MODEL,
       });
     } catch (err) {
+      if(req.aiSignal?.aborted)return;
       if (err.response) {
         return res.status(502).json({ error: 'AI Service Error', message: 'Failed to get AI response', details: err.response.data });
       }
@@ -308,9 +315,10 @@ Aging Benefit: ${mod.aging_benefit || 'Not specified'}
 
 Provide detailed cost breakdown including labor, materials, permits, timeline, ROI calculation, and contractor selection tips.`;
 
-      const aiResult = await callOpenRouter(systemPrompt, userPrompt);
+      const aiResult = await callOpenRouter(systemPrompt, userPrompt, undefined, req.aiSignal);
 
-      const estResult = await query(
+      const estResult = await persistNativeAI(pool,req.aiSignal,async(client)=>{
+      const estResult = await client.query(
         `INSERT INTO cost_estimates (modification_id, labor_cost, materials_cost, timeline_days, roi_score, notes,
            permits_cost, total_estimated_cost, years_to_payback, avoided_costs_explanation, contractor_tips, diy_savings)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
@@ -321,7 +329,9 @@ Provide detailed cost breakdown including labor, materials, permits, timeline, R
          aiResult.contractor_tips || null, aiResult.diy_savings || null]
       );
 
-      await persistAIResult(req.user.id, mod.home_id, 'estimate-costs', aiResult);
+      await persistAIResult(req.user.id, mod.home_id, 'estimate-costs', aiResult, req.aiSignal,client);
+        return estResult;
+      });
 
       return res.json({
         cost_estimate: estResult.rows[0],
@@ -329,6 +339,7 @@ Provide detailed cost breakdown including labor, materials, permits, timeline, R
         model_used: process.env.OPENROUTER_MODEL || MODEL,
       });
     } catch (err) {
+      if(req.aiSignal?.aborted)return;
       if (err.response) {
         return res.status(502).json({ error: 'AI Service Error', message: 'Failed to get AI response', details: err.response.data });
       }
@@ -398,7 +409,7 @@ fall_risk_score 0-100 (higher = more risk). Provide exactly 5 top hazard locatio
 
 Home: ${home.address}
 Year Built: ${home.year_built || 'Unknown'}, Floors: ${home.num_floors}
-Current Accessibility Score: ${home.current_accessibility_score || 0}/100
+Current Accessibility Score: ${home.current_accessibility_score ?? 'Not assessed'}/100
 
 Resident Profile:
 ${JSON.stringify(effectiveProfile, null, 2)}
@@ -408,17 +419,20 @@ ${home.latest_assessment ? JSON.stringify(home.latest_assessment, null, 2) : 'No
 
 Provide fall risk score, top 5 hazard locations with risk contribution percentages, annual and 5-year fall probability, estimated fall cost, and prevention ROI.`;
 
-      const aiResult = await callOpenRouter(systemPrompt, userPrompt);
+      const aiResult = await callOpenRouter(systemPrompt, userPrompt, undefined, req.aiSignal);
 
+      const savedResult = await persistNativeAI(pool,req.aiSignal,async(client)=>{
       // Persist fall risk to database
-      const savedResult = await query(
+      const savedResult = await client.query(
         `INSERT INTO fall_risk_history (home_id, user_id, fall_risk_score, risk_category, annual_fall_probability, five_year_fall_probability, ai_result)
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
         [home_id, req.user.id, aiResult.fall_risk_score || null, aiResult.risk_category || null,
          aiResult.annual_fall_probability || null, aiResult.five_year_fall_probability || null, JSON.stringify(aiResult)]
       );
 
-      await persistAIResult(req.user.id, home_id, 'fall-risk-assessment', aiResult);
+      await persistAIResult(req.user.id, home_id, 'fall-risk-assessment', aiResult, req.aiSignal,client);
+        return savedResult;
+      });
 
       return res.json({
         id: savedResult.rows[0].id,
@@ -437,6 +451,7 @@ Provide fall risk score, top 5 hazard locations with risk contribution percentag
         model_used: process.env.OPENROUTER_MODEL || MODEL,
       });
     } catch (err) {
+      if(req.aiSignal?.aborted)return;
       if (err.response) {
         return res.status(502).json({ error: 'AI Service Error', message: 'Failed to get AI response', details: err.response.data });
       }
@@ -457,11 +472,12 @@ router.post(
     body('income_level').optional().isIn(['very_low', 'low', 'moderate', 'above_moderate']),
     body('is_veteran').optional().isBoolean(),
     body('is_disabled').optional().isBoolean(),
+    body('funding_goal').optional().isString().trim().isLength({max:1000}),
   ],
   validate,
   async (req, res) => {
     try {
-      const { home_id, state, zip_code, income_level, is_veteran, is_disabled } = req.body;
+      const { home_id, state, zip_code, income_level, is_veteran, is_disabled, funding_goal } = req.body;
 
       const homeResult = await query('SELECT * FROM homes WHERE id = $1 AND user_id = $2', [home_id, req.user.id]);
       if (homeResult.rows.length === 0) return res.status(404).json({ error: 'Home not found' });
@@ -503,16 +519,18 @@ match_score 0-100 based on eligibility fit. Include federal, state, local, and n
 Location: ${home.address}, State: ${state || 'Unknown'}, ZIP: ${zip_code || 'Unknown'}
 Resident Age: ${profile?.age || 'Unknown'}
 Income Level: ${income_level || 'Not specified'}
-Veteran Status: ${is_veteran ? 'Yes' : 'No'}
-Disability Status: ${is_disabled ? 'Yes' : 'No'}
+Veteran Status: ${is_veteran === undefined ? 'Unknown — not supplied' : is_veteran ? 'Yes' : 'No'}
+Disability Status: ${is_disabled === undefined ? 'Unknown — not supplied' : is_disabled ? 'Yes' : 'No'}
 Mobility Issues: ${profile?.mobility_issues || 'Not specified'}
+Funding review goal: ${funding_goal || 'Review potential program routes'}
+Unknown eligibility must remain unverified. Do not claim eligibility, approved funding, or any application.
 
 Find all applicable federal programs (HUD, USDA, VA, Medicare, Medicaid), state programs, and non-profit grants.
 Return programs ranked by match score and total potential funding.`;
 
-      const aiResult = await callOpenRouter(systemPrompt, userPrompt);
+      const aiResult = await callOpenRouter(systemPrompt, userPrompt, undefined, req.aiSignal);
 
-      await persistAIResult(req.user.id, home_id, 'find-grants', aiResult);
+      await persistAIResult(req.user.id, home_id, 'find-grants', aiResult, req.aiSignal);
 
       return res.json({
         grants: aiResult.grants || [],
@@ -522,6 +540,7 @@ Return programs ranked by match score and total potential funding.`;
         model_used: process.env.OPENROUTER_MODEL || MODEL,
       });
     } catch (err) {
+      if(req.aiSignal?.aborted)return;
       if (err.response) {
         return res.status(502).json({ error: 'AI Service Error', message: 'Failed to get AI response', details: err.response.data });
       }
@@ -585,9 +604,9 @@ ${JSON.stringify(assessment.ai_result, null, 2)}
 
 Provide comprehensive compliance checklist against ADA Title III, Fair Housing Amendments Act, and universal design standards.`;
 
-      const aiResult = await callOpenRouter(systemPrompt, userPrompt);
+      const aiResult = await callOpenRouter(systemPrompt, userPrompt, undefined, req.aiSignal);
 
-      await persistAIResult(req.user.id, assessment.home_id, 'compliance-report', aiResult);
+      await persistAIResult(req.user.id, assessment.home_id, 'compliance-report', aiResult, req.aiSignal);
 
       return res.json({
         overall_compliance_score: aiResult.overall_compliance_score,
@@ -600,6 +619,7 @@ Provide comprehensive compliance checklist against ADA Title III, Fair Housing A
         model_used: process.env.OPENROUTER_MODEL || MODEL,
       });
     } catch (err) {
+      if(req.aiSignal?.aborted)return;
       if (err.response) {
         return res.status(502).json({ error: 'AI Service Error', message: 'Failed to get AI response', details: err.response.data });
       }
@@ -657,9 +677,9 @@ ${JSON.stringify(modsResult.rows, null, 2)}
 Select modifications that maximize safety improvement within the $${budget.toLocaleString()} budget.
 Use the midpoint of cost ranges for estimates. Prioritize by priority score and ROI.`;
 
-      const aiResult = await callOpenRouter(systemPrompt, userPrompt);
+      const aiResult = await callOpenRouter(systemPrompt, userPrompt, undefined, req.aiSignal);
 
-      await persistAIResult(req.user.id, home_id, 'budget-optimizer', aiResult);
+      await persistAIResult(req.user.id, home_id, 'budget-optimizer', aiResult, req.aiSignal);
 
       const selectedMods = modsResult.rows.filter(m => (aiResult.selected_modifications || []).includes(m.id));
       const deferredMods = modsResult.rows.filter(m => (aiResult.deferred_modifications || []).includes(m.id));
@@ -676,6 +696,7 @@ Use the midpoint of cost ranges for estimates. Prioritize by priority score and 
         model_used: process.env.OPENROUTER_MODEL || MODEL,
       });
     } catch (err) {
+      if(req.aiSignal?.aborted)return;
       if (err.response) {
         return res.status(502).json({ error: 'AI Service Error', message: 'Failed to get AI response', details: err.response.data });
       }
@@ -735,38 +756,29 @@ Assessment: ${JSON.stringify(assessment.ai_result || {}, null, 2)}`;
 
     let aiResult;
     try {
-      aiResult = await callOpenRouter(systemPrompt, userPrompt);
+      aiResult = await callOpenRouter(systemPrompt, userPrompt, undefined, req.aiSignal);
     } catch (aiErr) {
-      send({ type: 'error', message: 'AI generation failed, using standard recommendations' });
-      aiResult = { modifications: [] };
+      if(req.aiSignal?.aborted)return;
+      send({ type: 'error', message: 'AI generation failed. No recommendations were saved.' });
+      return res.end();
     }
 
     const modifications = aiResult.modifications || [];
-    const savedMods = [];
-
-    for (let i = 0; i < modifications.length; i++) {
-      const mod = modifications[i];
-      try {
-        const modResult = await query(
-          `INSERT INTO modifications (assessment_id, room, modification_type, description,
-           estimated_cost_min, estimated_cost_max, priority, aging_benefit, ai_reasoning, status)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'recommended') RETURNING *`,
-          [assessmentId, mod.room, mod.modification_type, mod.description,
-           mod.estimated_cost_min || null, mod.estimated_cost_max || null,
-           mod.priority || (i + 1), mod.aging_benefit || null, mod.ai_reasoning || null]
-        );
-        if (modResult.rows.length > 0) {
-          savedMods.push(modResult.rows[0]);
-          send({ type: 'modification', modification: modResult.rows[0], index: savedMods.length });
-          await new Promise(r => setTimeout(r, 150));
-        }
-      } catch (modErr) {
-        send({ type: 'error', message: `Failed to save: ${mod.modification_type}` });
+    const savedMods = await persistNativeAI(pool,req.aiSignal,async(client)=>{
+      const saved=[];
+      for(let i=0;i<modifications.length;i++){
+        req.aiSignal?.throwIfAborted();const mod=modifications[i];
+        const result=await client.query(`INSERT INTO modifications (assessment_id,room,modification_type,description,estimated_cost_min,estimated_cost_max,priority,aging_benefit,ai_reasoning,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'recommended') RETURNING *`,[assessmentId,mod.room,mod.modification_type,mod.description,mod.estimated_cost_min??null,mod.estimated_cost_max??null,mod.priority??(i+1),mod.aging_benefit??null,mod.ai_reasoning??null]);
+        saved.push(result.rows[0]);
       }
-    }
+      await persistAIResult(req.user.id,assessment.home_id,'recommend-modifications-stream',aiResult,req.aiSignal,client);
+      return saved;
+    });
+    for(let i=0;i<savedMods.length;i++){req.aiSignal?.throwIfAborted();send({type:'modification',modification:savedMods[i],index:i+1});}
 
     send({ type: 'complete', total: savedMods.length, modifications: savedMods });
   } catch (err) {
+      if(req.aiSignal?.aborted)return;
     send({ error: err.message });
   }
 
@@ -815,6 +827,7 @@ router.get(
         pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       });
     } catch (err) {
+      if(req.aiSignal?.aborted)return;
       return res.status(500).json({ error: 'Internal Server Error', message: err.message });
     }
   }

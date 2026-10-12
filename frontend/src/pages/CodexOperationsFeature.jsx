@@ -1,55 +1,36 @@
-import React, { useMemo, useState } from 'react';
-
-const initialItems = [
-  { id: 1, owner: 'Ops', priority: 'High', status: 'Ready', task: 'Review exception queue' },
-  { id: 2, owner: 'AI', priority: 'Medium', status: 'In progress', task: 'Draft recommended next actions' },
-  { id: 3, owner: 'Compliance', priority: 'Low', status: 'Queued', task: 'Attach audit evidence' },
-];
-
-export default function CodexOperationsFeature() {
-  const [query, setQuery] = useState('');
-  const [items, setItems] = useState(initialItems);
-  const [task, setTask] = useState('');
-
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return items;
-    return items.filter((item) => Object.values(item).join(' ').toLowerCase().includes(normalized));
-  }, [items, query]);
-
-  function addTask(event) {
-    event.preventDefault();
-    if (!task.trim()) return;
-    setItems((current) => [
-      { id: Date.now(), owner: 'User', priority: 'Medium', status: 'Queued', task: task.trim() },
-      ...current,
-    ]);
-    setTask('');
-  }
-
-  return (
-    <section style={{ padding: 24, color: '#172033' }}>
-      <p style={{ margin: 0, color: '#64748b', fontSize: 13, fontWeight: 700, textTransform: 'uppercase' }}>Non-visual workflow</p>
-      <h1 style={{ margin: '6px 0 18px', fontSize: 30 }}> AI Aging In Place Home Modification Assessor Operations Desk</h1>
-
-      <form onSubmit={addTask} style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1fr) auto', gap: 10, marginBottom: 16 }}>
-        <input value={task} onChange={(event) => setTask(event.target.value)} placeholder="Add an operational follow-up" style={{ padding: '12px 14px', border: '1px solid #cbd5e1', borderRadius: 8 }} />
-        <button type="submit" style={{ padding: '12px 16px', border: 0, borderRadius: 8, background: '#172033', color: '#ffffff', fontWeight: 700 }}>Add task</button>
-      </form>
-
-      <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search owner, priority, status, or task" style={{ width: '100%', boxSizing: 'border-box', padding: '12px 14px', border: '1px solid #cbd5e1', borderRadius: 8, marginBottom: 16 }} />
-
-      <div style={{ border: '1px solid #d7dde8', borderRadius: 8, overflow: 'hidden', background: '#ffffff' }}>
-        {filtered.map((item) => (
-          <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '1fr 120px 120px 120px', gap: 12, padding: 14, borderBottom: '1px solid #e2e8f0', alignItems: 'center' }}>
-            <strong>{item.task}</strong>
-            <span>{item.owner}</span>
-            <span>{item.priority}</span>
-            <span>{item.status}</span>
-          </div>
-        ))}
-        {filtered.length === 0 && <div style={{ padding: 18, color: '#64748b' }}>No matching workflow items.</div>}
-      </div>
-    </section>
-  );
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import api from '../api/client';
+import Modal from '../components/AIWorkspaceModal';
+import '../components/AIWorkspace.css';
+const fields=[['title','Planning draft name'],['schedule','Proposed schedule'],['caregiverRoster','Caregiver planning notes'],['escalationRules','Escalation planning notes']];
+const labels=['Demo planning · Initial review','Demo planning · Team coordination','Demo planning · Detailed review'];
+const empty=()=>({title:'',schedule:'',caregiverRoster:'',escalationRules:''});
+function PlanningForm({item,sources,onSaved,onCancel}){
+ const [values,setValues]=useState(()=>item?{title:item.title,...Object.fromEntries(fields.slice(1).map(([key])=>[key,item.payload?.[key]||'']))}:empty());
+ const [sourceId,setSourceId]=useState(item?.id?String(item.id):'');const [saving,setSaving]=useState(false),[error,setError]=useState('');
+ const source=item||sources.find(row=>String(row.id)===sourceId);
+ const fill=index=>{const current=source||sources[0];if(!current)return;setSourceId(String(current.id));setValues({title:`Planning draft · ${['Initial review','Team coordination','Detailed review'][index]}`,schedule:['Unscheduled planning review; confirm actual availability before scheduling.','Draft weekly planning review; no visit or appointment is booked.','Draft phased review; dates await an authorized care assessment.'][index],caregiverRoster:'No caregiver is assigned by this draft. Collect genuine caregiver availability and permissions before any care review.',escalationRules:'No automated emergency action. Collect authorized escalation instructions and emergency contacts before any transition.'});setError('');};
+ const save=async event=>{event.preventDefault();if(saving||!source)return;setSaving(true);setError('');try{const payload={...(item?.payload||{}),residentReference:source.payload.residentReference,assessmentReference:source.payload.assessmentReference,...Object.fromEntries(fields.slice(1).map(([key])=>[key,values[key]]))};if(!item){payload.consentCurrent=false;payload.automatedEmergencyAction=false;payload.modelOutputTrusted=false;}
+ const response=item?await api.patch(`/care-workflows/${item.id}`,{title:values.title,payload,expectedVersion:item.version}):await api.post('/care-workflows',{title:values.title,payload,evidence:[],idempotencyKey:`planning-${globalThis.crypto?.randomUUID?.()||Date.now()}`});onSaved(response.data);
+ }catch(failure){setError(failure.response?.data?.message||failure.message||'Planning draft could not be saved.');}finally{setSaving(false);}};
+ return <form onSubmit={save}><p className="ai-muted">Persisted planning only. Evidence, consent, approvals, provider handoffs, and clinical findings remain separate requirements.</p><div className="ai-preset-bar"><strong>Complete planning examples</strong><div className="ai-actions">{labels.map((label,index)=><button type="button" key={label} className="btn btn-secondary" disabled={saving||!sources.length} onClick={()=>fill(index)}>{label}</button>)}</div></div>
+ {!item&&<div className="ai-form-field"><label>Saved source case<select aria-label="Saved source case" value={sourceId} disabled={saving} required onChange={event=>setSourceId(event.target.value)}><option value="">Choose an actual saved planning case…</option>{sources.map(row=><option value={String(row.id)} key={row.id}>{row.title}</option>)}</select></label></div>}
+ {source&&<dl className="ai-report-facts"><div><dt>Resident source</dt><dd>{source.payload?.residentReference}</dd></div><div><dt>Assessment source</dt><dd>{source.payload?.assessmentReference}</dd></div></dl>}
+ {!sources.length&&<p role="status">Create an actor-owned source case with actual profile and assessment references before adding a planning draft.</p>}
+ {fields.map(([key,label])=><div className="ai-form-field" key={key}><label htmlFor={`care-${key}`}>{label}</label><textarea id={`care-${key}`} value={values[key]} disabled={saving} required onChange={event=>setValues({...values,[key]:event.target.value})}/></div>)}
+ {error&&<p role="alert" className="ai-alert">{error}</p>}<div className="ai-actions"><button type="button" className="btn btn-secondary" disabled={saving} onClick={onCancel}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving||!source||fields.some(([key])=>!String(values[key]||'').trim())}>{saving?'Saving…':'Save planning draft'}</button></div></form>;
+}
+export default function CodexOperationsFeature(){
+ const [rows,setRows]=useState([]),[loading,setLoading]=useState(true),[loadError,setLoadError]=useState(''),[selected,setSelected]=useState(null),[mode,setMode]=useState(null),[actionError,setActionError]=useState(''),[busy,setBusy]=useState(false);const active=useRef(null);
+ const load=useCallback(async()=>{active.current?.abort();const controller=new AbortController();active.current=controller;setLoading(true);setLoadError('');try{const response=await api.get('/care-workflows',{signal:controller.signal});if(!Array.isArray(response.data))throw Error('The care planning service returned an invalid list.');if(active.current===controller&&!controller.signal.aborted)setRows(response.data);}catch(failure){if(active.current===controller&&!controller.signal.aborted)setLoadError(failure.response?.data?.message||failure.message||'Care planning drafts could not be loaded.');}finally{if(active.current===controller&&!controller.signal.aborted){active.current=null;setLoading(false);}}},[]);
+ useEffect(()=>{load();return()=>{active.current?.abort();active.current=null;}},[load]);const close=()=>{if(busy)return;setSelected(null);setMode(null);setActionError('');};const saved=()=>{close();load();};
+ const remove=async()=>{if(!selected||selected.status!=='draft'||busy)return;setBusy(true);setActionError('');try{await api.post(`/care-workflows/${selected.id}/transition`,{targetStatus:'closed',expectedVersion:selected.version});setSelected(null);setMode(null);await load();}catch(failure){setActionError(failure.response?.data?.message||failure.message||'The draft could not be removed from the desk.');}finally{setBusy(false);}};
+ const visible=rows.filter(row=>row.status!=='closed');const sources=rows.filter(row=>row.payload?.residentReference&&row.payload?.assessmentReference);
+ return <main className="ai-workspace"><header className="ai-workspace-heading"><span className="ai-eyebrow">Native care planning</span><h1>Care Operations Desk</h1><p>Persisted planning drafts for your signed-in account. No automated care or emergency action occurs here.</p><button type="button" className="btn btn-primary" onClick={()=>{setMode('new');setActionError('');}}>New planning draft</button></header>
+ {loading?<p role="status">Loading care planning drafts…</p>:loadError?<section role="alert" className="native-load-error"><strong>Care planning drafts could not be loaded.</strong><p>{loadError}</p><button type="button" className="btn btn-secondary" onClick={load}>Retry</button></section>:!visible.length?<p>No open planning drafts have been saved for this account.</p>:<section className="ai-history"><h2>{visible.length} saved planning drafts</h2>{visible.map(row=><button type="button" className="ai-history-row" key={row.id} onClick={()=>{setSelected(row);setMode('details');setActionError('');}}><strong>{row.title}</strong><span>{row.status} · Open details →</span></button>)}</section>}
+ {mode==='new'&&<Modal title="New care planning draft" onClose={close}><PlanningForm sources={sources} onSaved={saved} onCancel={close}/></Modal>}
+ {mode==='edit'&&selected&&<Modal title="Edit care planning draft" onClose={close}><PlanningForm item={selected} sources={sources} onSaved={saved} onCancel={close}/></Modal>}
+ {mode==='details'&&selected&&<Modal title={selected.title} onClose={close} footer={<><button type="button" className="btn btn-secondary" onClick={close}>Cancel</button><button type="button" className="btn btn-secondary" disabled={selected.status!=='draft'} onClick={()=>setMode('edit')}>Edit</button><button type="button" className="btn btn-danger" disabled={selected.status!=='draft'} onClick={()=>setMode('delete')}>Delete from desk</button></>}><p className="ai-muted">{selected.payload?.trainingNotice||'Planning record; verify current evidence before any care action.'}</p><dl className="ai-report-facts"><div><dt>Status</dt><dd>{selected.status}</dd></div><div><dt>Evidence attached</dt><dd>{selected.evidence?.length||0}</dd></div><div><dt>Consent verified</dt><dd>{selected.payload?.consentCurrent===true?'Yes':'No'}</dd></div>{['residentReference','assessmentReference','schedule','caregiverRoster','escalationRules'].map(key=><div key={key}><dt>{key.replace(/([A-Z])/g,' $1')}</dt><dd>{selected.payload?.[key]||'Not supplied'}</dd></div>)}</dl></Modal>}
+ {mode==='delete'&&selected&&<Modal title="Delete planning draft from desk?" onClose={close} footer={<><button type="button" className="btn btn-secondary" disabled={busy} onClick={()=>setMode('details')}>Cancel</button><button type="button" className="btn btn-danger" disabled={busy} onClick={remove}>{busy?'Removing…':'Delete from desk'}</button></>}><p>This closes only the selected draft and removes it from the open desk. Its audit and evidence history remain preserved.</p>{actionError&&<p role="alert" className="ai-alert">{actionError}</p>}</Modal>}
+ </main>;
 }

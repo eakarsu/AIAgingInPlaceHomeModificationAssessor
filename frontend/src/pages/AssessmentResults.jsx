@@ -1,6 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import FullFieldPresets from '../components/FullFieldPresets';
+import AIReport from '../components/AIReport';
+import NativeAssessmentRecord from '../components/NativeAssessmentRecord';
+import useNativeAI from '../services/useNativeAI';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../api/client';
+import { readRecordList } from '../services/nativeRecords';
 
 const s = {
   page: { maxWidth: '1000px', margin: '0 auto', padding: '24px' },
@@ -23,10 +28,13 @@ const statusText = { recommended: '#2b6cb0', planned: '#744210', in_progress: '#
 
 export default function AssessmentResults() {
   const { id } = useParams();
+  const {post:aiPost,cancel:cancelAI,busy:aiBusy}=useNativeAI(id);
+  const [aiError,setAIError]=useState('');
   const navigate = useNavigate();
   const [assessment, setAssessment] = useState(null);
   const [modifications, setModifications] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [activeTab, setActiveTab] = useState('overview');
   const [generatingMods, setGeneratingMods] = useState(false);
   const [estimating, setEstimating] = useState(null);
@@ -35,7 +43,7 @@ export default function AssessmentResults() {
   // Grants state
   const [grants, setGrants] = useState(null);
   const [loadingGrants, setLoadingGrants] = useState(false);
-  const [grantForm, setGrantForm] = useState({ state: '', zip_code: '', income_level: '', is_veteran: false, is_disabled: false });
+  const [grantForm, setGrantForm] = useState({ state: '', zip_code: '', income_level: '', is_veteran: '', is_disabled: '', funding_goal: '' });
 
   // Compliance state
   const [compliance, setCompliance] = useState(null);
@@ -48,30 +56,40 @@ export default function AssessmentResults() {
 
   // Mod progress state
   const [updatingMod, setUpdatingMod] = useState(null);
+  const [selectedRecord, setSelectedRecord] = useState(null);
+  const dataRequest = useRef(null);
 
-  useEffect(() => { loadData(); }, [id]);
+  useEffect(() => {
+    cancelAI(); setSelectedRecord(null); setGrants(null); setCompliance(null); setBudgetResult(null); setCostEstimates({}); setAIError('');
+    loadData();
+    return () => { dataRequest.current?.abort(); dataRequest.current = null; };
+  }, [id]);
 
   const loadData = async () => {
+    dataRequest.current?.abort(); const controller = new AbortController(); dataRequest.current = controller;
+    setLoading(true); setLoadError('');
     try {
-      const res = await api.get(`/assessments/${id}`);
-      setAssessment(res.data.assessment);
-      const modRes = await api.get(`/modifications?assessmentId=${id}`);
-      setModifications(modRes.data.data || []);
-    } catch (err) {
-      console.error('Load error:', err);
+      const [res, modRes] = await Promise.all([api.get(`/assessments/${id}`, {signal:controller.signal}), api.get(`/modifications?assessmentId=${id}`, {signal:controller.signal})]);
+      if (String(res.data.assessment?.id) !== String(id)) throw new Error('The assessment service returned an invalid source record.');
+      const rows = readRecordList(modRes.data);
+      if (dataRequest.current !== controller || controller.signal.aborted) return;
+      setAssessment(res.data.assessment); setModifications(rows);
+    } catch (failure) {
+      if (dataRequest.current === controller && !controller.signal.aborted) setLoadError(failure.response?.data?.message || failure.message || 'Assessment data could not be loaded.');
     } finally {
-      setLoading(false);
+      if (dataRequest.current === controller && !controller.signal.aborted) { dataRequest.current = null; setLoading(false); }
     }
   };
 
   const generateModifications = async () => {
     setGeneratingMods(true);
     try {
-      await api.post('/ai/recommend-modifications', { assessment_id: parseInt(id) });
+      await aiPost('/ai/recommend-modifications', { assessment_id: parseInt(id) });
       const modRes = await api.get(`/modifications?assessmentId=${id}`);
-      setModifications(modRes.data.data || []);
+      setModifications(readRecordList(modRes.data));
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to generate modifications');
+      if(err.name==='AbortError'||err.code==='ERR_CANCELED')return;
+      setAIError(err.response?.data?.message || 'Failed to generate modifications');
     } finally {
       setGeneratingMods(false);
     }
@@ -80,10 +98,11 @@ export default function AssessmentResults() {
   const estimateCost = async (modId) => {
     setEstimating(modId);
     try {
-      const res = await api.post('/ai/estimate-costs', { modification_id: modId });
+      const res = await aiPost('/ai/estimate-costs', { modification_id: modId });
       setCostEstimates(prev => ({ ...prev, [modId]: res.data.details }));
     } catch (err) {
-      alert('Failed to estimate cost');
+      if(err.name==='AbortError'||err.code==='ERR_CANCELED')return;
+      setAIError('Failed to estimate cost');
     } finally {
       setEstimating(null);
     }
@@ -94,9 +113,9 @@ export default function AssessmentResults() {
     try {
       await api.patch(`/modifications/${modId}`, { status });
       const modRes = await api.get(`/modifications?assessmentId=${id}`);
-      setModifications(modRes.data.data || []);
+      setModifications(readRecordList(modRes.data));
     } catch (err) {
-      console.error('Update mod error:', err);
+      setAIError(err.response?.data?.message || err.message || 'The modification status could not be saved.');
     } finally {
       setUpdatingMod(null);
     }
@@ -104,19 +123,21 @@ export default function AssessmentResults() {
 
   const findGrants = async (e) => {
     e.preventDefault();
-    setLoadingGrants(true);
+    setLoadingGrants(true);setAIError('');
     try {
-      const res = await api.post('/ai/find-grants', {
+      const res = await aiPost('/ai/find-grants', {
         home_id: assessment.home_id,
-        state: grantForm.state || undefined,
-        zip_code: grantForm.zip_code || undefined,
-        income_level: grantForm.income_level || undefined,
-        is_veteran: grantForm.is_veteran,
-        is_disabled: grantForm.is_disabled,
+        state: grantForm.state === 'Unknown' ? undefined : grantForm.state || undefined,
+        zip_code: grantForm.zip_code === 'Unknown' ? undefined : grantForm.zip_code || undefined,
+        income_level: grantForm.income_level === 'unknown' ? undefined : grantForm.income_level || undefined,
+        is_veteran: grantForm.is_veteran === 'unknown' || !grantForm.is_veteran ? undefined : grantForm.is_veteran === 'yes',
+        is_disabled: grantForm.is_disabled === 'unknown' || !grantForm.is_disabled ? undefined : grantForm.is_disabled === 'yes',
+        funding_goal: grantForm.funding_goal || undefined,
       });
       setGrants(res.data);
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to find grants');
+      if(err.name==='AbortError'||err.code==='ERR_CANCELED')return;
+      setAIError(err.response?.data?.message || 'Failed to find grants');
     } finally {
       setLoadingGrants(false);
     }
@@ -125,10 +146,11 @@ export default function AssessmentResults() {
   const runCompliance = async () => {
     setLoadingCompliance(true);
     try {
-      const res = await api.post('/ai/compliance-report', { assessment_id: parseInt(id) });
+      const res = await aiPost('/ai/compliance-report', { assessment_id: parseInt(id) });
       setCompliance(res.data);
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to generate compliance report');
+      if(err.name==='AbortError'||err.code==='ERR_CANCELED')return;
+      setAIError(err.response?.data?.message || 'Failed to generate compliance report');
     } finally {
       setLoadingCompliance(false);
     }
@@ -136,30 +158,32 @@ export default function AssessmentResults() {
 
   const runBudgetOptimizer = async (e) => {
     e.preventDefault();
-    if (!budget || parseInt(budget) < 100) return alert('Please enter a valid budget (min $100)');
-    setLoadingBudget(true);
+    if (!budget || parseInt(budget) < 100) return setAIError('Please enter a valid budget (min $100)');
+    setLoadingBudget(true);setAIError('');
     try {
-      const res = await api.post('/ai/budget-optimizer', {
+      const res = await aiPost('/ai/budget-optimizer', {
         home_id: assessment.home_id,
         budget: parseInt(budget),
       });
       setBudgetResult(res.data);
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to optimize budget');
+      if(err.name==='AbortError'||err.code==='ERR_CANCELED')return;
+      setAIError(err.response?.data?.message || 'Failed to optimize budget');
     } finally {
       setLoadingBudget(false);
     }
   };
 
   if (loading) return <div style={{ textAlign: 'center', padding: '80px', color: '#718096' }}>Loading assessment...</div>;
+  if (loadError) return <section role="alert" style={s.card}><h1>Assessment data could not be loaded</h1><p>{loadError}</p><button type="button" style={{ ...s.btn, ...s.btnSecondary }} onClick={loadData}>Retry</button></section>;
   if (!assessment) return <div style={{ textAlign: 'center', padding: '80px' }}>Assessment not found</div>;
 
   const aiResult = assessment.ai_result || {};
   const roomRisks = aiResult.room_risks || [];
   const topPriorities = aiResult.top_priorities || [];
   const immediateActions = aiResult.immediate_actions || [];
-  const score = assessment.safety_score || aiResult.safety_score || 0;
-  const urgency = assessment.urgency_level || aiResult.urgency_level || 'low';
+  const score = assessment.safety_score ?? aiResult.safety_score ?? null;
+  const urgency = assessment.urgency_level || aiResult.urgency_level || 'Not assessed';
 
   const tabs = [
     { key: 'overview', label: 'Overview' },
@@ -175,7 +199,11 @@ export default function AssessmentResults() {
         <button style={{ ...s.btn, ...s.btnSecondary, padding: '6px 14px' }} onClick={() => navigate(-1)}>← Back</button>
         <span style={{ fontWeight: '700', fontSize: '16px' }}>Assessment Results</span>
       </nav>
+      {selectedRecord && <NativeAssessmentRecord kind={selectedRecord.kind} recordId={selectedRecord.id} onClose={() => setSelectedRecord(null)} onChanged={change => {if(change.kind==='assessment'&&change.deleted)navigate('/homes/'+assessment.home_id);else loadData();}}/>}
       <div style={s.page}>
+        {aiError&&<section role="alert" className="ai-alert">{aiError}</section>}
+        {aiBusy&&<div role="status" className="ai-loading">Generating with OpenRouter… <button type="button" style={{...s.btn,...s.btnSecondary}} onClick={cancelAI}>Cancel AI request</button></div>}
+        <button type="button" style={{...s.btn,...s.btnSecondary,marginBottom:16}} onClick={() => setSelectedRecord({kind:'assessment',id:assessment.id})}>Open assessment details</button>
         {/* Score Hero */}
         <div style={{ ...s.card, background: `linear-gradient(135deg, ${urgencyGradient[urgency] || '#667eea'} 0%, #764ba2 100%)`, color: '#fff' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -186,7 +214,7 @@ export default function AssessmentResults() {
               </p>
             </div>
             <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: '56px', fontWeight: '800', lineHeight: 1 }}>{score}</div>
+              <div style={{ fontSize: '56px', fontWeight: '800', lineHeight: 1 }}>{score === null ? 'Not assessed' : score}</div>
               <div style={{ fontSize: '13px', opacity: 0.85 }}>Safety Score / 100</div>
               <div style={{ marginTop: '8px', background: 'rgba(255,255,255,0.2)', padding: '4px 14px', borderRadius: '20px', fontSize: '13px', fontWeight: '600', textTransform: 'capitalize' }}>
                 {urgency} Urgency
@@ -283,7 +311,7 @@ export default function AssessmentResults() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
               <h3 style={{ margin: 0 }}>Recommended Modifications ({modifications.length})</h3>
               <button style={{ ...s.btn, ...s.btnPrimary }} onClick={generateModifications} disabled={generatingMods}>
-                {generatingMods ? 'Generating...' : 'Generate AI Modifications'}
+                {generatingMods ? 'Generating...' : 'Generate modifications with OpenRouter'}
               </button>
             </div>
 
@@ -348,8 +376,9 @@ export default function AssessmentResults() {
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginLeft: '16px', flexShrink: 0, alignItems: 'flex-end' }}>
                     <span style={{ ...s.badge, background: '#ebf8ff', color: '#2b6cb0', fontSize: '11px', padding: '2px 8px' }}>P{m.priority}</span>
+                    <button type="button" style={{...s.btn,...s.btnSecondary,padding:'5px 10px',fontSize:'12px'}} onClick={() => setSelectedRecord({kind:'modification',id:m.id})}>Open details</button>
                     <button style={{ ...s.btn, ...s.btnSecondary, padding: '5px 10px', fontSize: '12px' }} onClick={() => estimateCost(m.id)} disabled={estimating === m.id}>
-                      {estimating === m.id ? '...' : 'Cost Est.'}
+                      {estimating === m.id ? '...' : 'Generate cost estimate with OpenRouter'}
                     </button>
                     {m.status === 'recommended' && (
                       <button style={{ ...s.btn, ...s.btnPrimary, padding: '5px 10px', fontSize: '12px' }} disabled={updatingMod === m.id} onClick={() => updateModStatus(m.id, 'planned')}>Plan</button>
@@ -375,7 +404,9 @@ export default function AssessmentResults() {
               <p style={{ margin: '0 0 16px', fontSize: '14px', color: '#718096' }}>
                 Discover federal, state, and local programs that may fund your home modifications.
               </p>
-              <form onSubmit={findGrants}>
+              <form data-native-ai="grants" onSubmit={findGrants}>
+                <FullFieldPresets value={grantForm} onChange={setGrantForm} disabled={aiBusy} presets={['Find source requirements','Compare program routes','Review eligibility gaps'].map((label,index)=>({label,values:{state:'Unknown',zip_code:'Unknown',income_level:'unknown',is_veteran:'unknown',is_disabled:'unknown',funding_goal:['Identify missing verified location and eligibility data before ranking possible programs.','Compare potential public and nonprofit program types, marking all eligibility unverified.','Prepare a checklist of authorized documents and review questions; do not claim any eligibility or approved funding.'][index]}}))}/>
+                <p className="ai-muted">Each choice fills every field. Unknown eligibility stays unknown; no application, approval, or payment is created.</p>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
                   <div>
                     <label style={{ fontSize: '12px', fontWeight: '600', color: '#4a5568', display: 'block', marginBottom: '4px' }}>State</label>
@@ -391,79 +422,23 @@ export default function AssessmentResults() {
                     <label style={{ fontSize: '12px', fontWeight: '600', color: '#4a5568', display: 'block', marginBottom: '4px' }}>Income Level</label>
                     <select style={{ width: '100%', padding: '8px 12px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }}
                       value={grantForm.income_level} onChange={e => setGrantForm(p => ({ ...p, income_level: e.target.value }))}>
-                      <option value="">Not specified</option>
+                      <option value="">Choose income information</option><option value="unknown">Unknown — not supplied</option>
                       <option value="very_low">Very Low (&lt; 50% AMI)</option>
                       <option value="low">Low (50–80% AMI)</option>
                       <option value="moderate">Moderate (80–120% AMI)</option>
                       <option value="above_moderate">Above Moderate (&gt; 120% AMI)</option>
                     </select>
                   </div>
-                  <div style={{ display: 'flex', gap: '20px', alignItems: 'center', paddingTop: '20px' }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', cursor: 'pointer' }}>
-                      <input type="checkbox" checked={grantForm.is_veteran} onChange={e => setGrantForm(p => ({ ...p, is_veteran: e.target.checked }))} />
-                      Veteran
-                    </label>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', cursor: 'pointer' }}>
-                      <input type="checkbox" checked={grantForm.is_disabled} onChange={e => setGrantForm(p => ({ ...p, is_disabled: e.target.checked }))} />
-                      Disability
-                    </label>
-                  </div>
+                  <div>{[['is_veteran','Veteran status'],['is_disabled','Disability status']].map(([key,label])=><label key={key} style={{display:'block',marginBottom:12}}>{label}<select value={grantForm[key]} onChange={e=>setGrantForm(p=>({...p,[key]:e.target.value}))}><option value="">Choose verified status</option><option value="unknown">Unknown — not supplied</option><option value="yes">Yes — verified</option><option value="no">No — verified</option></select></label>)}</div>
+                  <label>Funding review goal<textarea value={grantForm.funding_goal} onChange={e=>setGrantForm(p=>({...p,funding_goal:e.target.value}))}/></label>
                 </div>
-                <button type="submit" style={{ ...s.btn, ...s.btnPrimary }} disabled={loadingGrants}>
-                  {loadingGrants ? 'Searching AI...' : 'Find Funding Programs'}
+                <button type="submit" style={{ ...s.btn, ...s.btnPrimary }} disabled={aiBusy}>
+                  {loadingGrants ? 'Searching AI...' : 'Generate funding report with OpenRouter'}
                 </button>
               </form>
             </div>
 
-            {grants && (
-              <>
-                {grants.total_potential_funding > 0 && (
-                  <div style={{ ...s.card, background: '#f0fff4', border: '1px solid #68d391' }}>
-                    <div style={{ fontSize: '28px', fontWeight: '700', color: '#22543d' }}>
-                      Up to ${(grants.total_potential_funding || 0).toLocaleString()} available
-                    </div>
-                    <div style={{ fontSize: '13px', color: '#276749', marginTop: '4px' }}>Total potential funding from matched programs</div>
-                    {grants.next_steps?.length > 0 && (
-                      <div style={{ marginTop: '12px' }}>
-                        <div style={{ fontWeight: '600', fontSize: '13px', marginBottom: '6px', color: '#22543d' }}>Next Steps:</div>
-                        {grants.next_steps.map((step, i) => <div key={i} style={{ fontSize: '13px', color: '#276749', marginBottom: '4px' }}>→ {step}</div>)}
-                      </div>
-                    )}
-                  </div>
-                )}
-                {(grants.grants || []).map((g, i) => (
-                  <div key={i} style={s.card}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
-                          <span style={{ fontWeight: '700', fontSize: '15px' }}>{g.program_name}</span>
-                          <span style={{ ...s.badge, background: g.type === 'grant' ? '#c6f6d5' : '#bee3f8', color: g.type === 'grant' ? '#22543d' : '#2a69ac', fontSize: '11px', padding: '2px 8px' }}>
-                            {g.type}
-                          </span>
-                          {g.match_score >= 80 && <span style={{ ...s.badge, background: '#fefcbf', color: '#744210', fontSize: '11px', padding: '2px 8px' }}>High Match</span>}
-                        </div>
-                        <div style={{ fontSize: '13px', color: '#4a5568', marginBottom: '4px' }}>{g.agency}</div>
-                        {g.max_amount > 0 && <div style={{ fontSize: '14px', fontWeight: '600', color: '#22543d', marginBottom: '6px' }}>Up to ${g.max_amount.toLocaleString()}</div>}
-                        <div style={{ fontSize: '13px', color: '#718096', marginBottom: '4px' }}>Eligibility: {g.eligibility}</div>
-                        {g.covers?.length > 0 && <div style={{ fontSize: '12px', color: '#718096' }}>Covers: {g.covers.join(', ')}</div>}
-                        {g.deadline && g.deadline !== 'Ongoing' && <div style={{ fontSize: '12px', color: '#c53030', marginTop: '4px' }}>Deadline: {g.deadline}</div>}
-                        {g.notes && <div style={{ fontSize: '12px', color: '#718096', marginTop: '4px', fontStyle: 'italic' }}>{g.notes}</div>}
-                      </div>
-                      <div style={{ flexShrink: 0, marginLeft: '16px', textAlign: 'center' }}>
-                        <div style={{ fontSize: '24px', fontWeight: '700', color: '#667eea' }}>{g.match_score}%</div>
-                        <div style={{ fontSize: '11px', color: '#718096' }}>match</div>
-                        {g.application_url && (
-                          <a href={g.application_url} target="_blank" rel="noopener noreferrer"
-                            style={{ display: 'block', marginTop: '8px', padding: '5px 10px', background: '#667eea', color: '#fff', borderRadius: '6px', textDecoration: 'none', fontSize: '12px', fontWeight: '600' }}>
-                            Apply →
-                          </a>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </>
-            )}
+            {grants && <AIReport response={grants} title="Funding options review"/>}
           </div>
         )}
 
@@ -477,78 +452,12 @@ export default function AssessmentResults() {
                   <p style={{ margin: 0, fontSize: '13px', color: '#718096' }}>Evaluate this home against ADA Title III and Fair Housing Amendment Act standards.</p>
                 </div>
                 <button style={{ ...s.btn, ...s.btnPrimary }} onClick={runCompliance} disabled={loadingCompliance}>
-                  {loadingCompliance ? 'Analyzing...' : compliance ? 'Re-Run' : 'Run Compliance Check'}
+                  {loadingCompliance ? 'Analyzing...' : 'Generate compliance report with OpenRouter'}
                 </button>
               </div>
             </div>
 
-            {compliance && (
-              <>
-                <div style={{ ...s.card, display: 'flex', gap: '20px', alignItems: 'center' }}>
-                  <div style={{ textAlign: 'center', flexShrink: 0 }}>
-                    <div style={{ fontSize: '48px', fontWeight: '800', color: compliance.overall_compliance_score >= 70 ? '#22543d' : compliance.overall_compliance_score >= 40 ? '#c05621' : '#c53030' }}>
-                      {compliance.overall_compliance_score}%
-                    </div>
-                    <div style={{ fontSize: '13px', color: '#718096' }}>Compliance Score</div>
-                    <div style={{ marginTop: '6px', ...s.badge, background: compliance.compliance_level === 'full' ? '#c6f6d5' : compliance.compliance_level === 'partial' ? '#fef3c7' : '#fed7d7',
-                      color: compliance.compliance_level === 'full' ? '#22543d' : compliance.compliance_level === 'partial' ? '#92400e' : '#c53030', textTransform: 'capitalize' }}>
-                      {compliance.compliance_level}
-                    </div>
-                  </div>
-                  <div>
-                    <p style={{ margin: '0 0 10px', fontSize: '14px', color: '#2d3748' }}>{compliance.summary}</p>
-                    {compliance.insurance_note && (
-                      <p style={{ margin: 0, fontSize: '13px', color: '#2b6cb0', background: '#ebf8ff', padding: '8px 12px', borderRadius: '6px' }}>{compliance.insurance_note}</p>
-                    )}
-                  </div>
-                </div>
-
-                {compliance.critical_violations?.length > 0 && (
-                  <div style={{ ...s.card, background: '#fff5f5', border: '1px solid #fc8181' }}>
-                    <h4 style={{ margin: '0 0 10px', color: '#c53030' }}>Critical Violations ({compliance.critical_violations.length})</h4>
-                    {compliance.critical_violations.map((v, i) => (
-                      <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px', fontSize: '13px', color: '#c53030' }}>
-                        <span>✗</span><span>{v}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {compliance.compliant_items?.length > 0 && (
-                  <div style={{ ...s.card, background: '#f0fff4', border: '1px solid #68d391' }}>
-                    <h4 style={{ margin: '0 0 10px', color: '#22543d' }}>Compliant Items ({compliance.compliant_items.length})</h4>
-                    {compliance.compliant_items.map((v, i) => (
-                      <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px', fontSize: '13px', color: '#22543d' }}>
-                        <span>✓</span><span>{v}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {compliance.checklist?.length > 0 && (
-                  <div style={s.card}>
-                    <h4 style={{ margin: '0 0 12px' }}>Full Compliance Checklist</h4>
-                    {compliance.checklist.map((item, i) => (
-                      <div key={i} style={{ display: 'flex', gap: '12px', padding: '12px', borderBottom: '1px solid #f7fafc', alignItems: 'flex-start' }}>
-                        <span style={{ fontSize: '18px', flexShrink: 0 }}>{item.status === 'pass' ? '✅' : '❌'}</span>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontWeight: '600', fontSize: '14px', marginBottom: '2px' }}>{item.requirement}</div>
-                          <div style={{ fontSize: '12px', color: '#718096', marginBottom: '4px' }}>Standard: {item.standard}</div>
-                          {item.current_state && <div style={{ fontSize: '13px', color: '#4a5568', marginBottom: '4px' }}>Current: {item.current_state}</div>}
-                          {item.required_action && item.status !== 'pass' && (
-                            <div style={{ fontSize: '13px', color: '#c53030' }}>Required: {item.required_action}</div>
-                          )}
-                          {item.estimated_cost > 0 && (
-                            <div style={{ fontSize: '12px', color: '#718096', marginTop: '4px' }}>Est. cost: ${item.estimated_cost.toLocaleString()}</div>
-                          )}
-                        </div>
-                        <div style={{ flexShrink: 0, fontSize: '12px', color: '#718096', fontWeight: '600' }}>P{item.priority}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
+            {compliance && <AIReport response={compliance} title="Accessibility compliance review"/>}
           </div>
         )}
 
@@ -560,85 +469,21 @@ export default function AssessmentResults() {
               <p style={{ margin: '0 0 16px', fontSize: '14px', color: '#718096' }}>
                 Enter your available budget and AI will select the optimal modifications for maximum safety improvement.
               </p>
-              <form onSubmit={runBudgetOptimizer} style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+              <FullFieldPresets value={{budget}} onChange={next=>setBudget(next.budget)} disabled={aiBusy} presets={[5000,10000,20000].map(value=>({label:`Plan a $${value.toLocaleString()} budget`,values:{budget:String(value)}}))}/><p className="ai-muted">Illustrative planning amounts only. Review your available budget before generating.</p>
+              <form data-native-ai="budget" onSubmit={runBudgetOptimizer} style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                 <div style={{ display: 'flex', alignItems: 'center', border: '1px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden' }}>
                   <span style={{ padding: '10px 12px', background: '#f7fafc', borderRight: '1px solid #e2e8f0', fontWeight: '600', color: '#4a5568' }}>$</span>
                   <input type="number" min="100" step="100" style={{ padding: '10px 14px', border: 'none', outline: 'none', fontSize: '15px', width: '160px' }}
                     placeholder="10,000" value={budget} onChange={e => setBudget(e.target.value)} />
                 </div>
-                <button type="submit" style={{ ...s.btn, ...s.btnPrimary }} disabled={loadingBudget || modifications.length === 0}>
-                  {loadingBudget ? 'Optimizing...' : 'Optimize Budget'}
+                <button type="submit" style={{ ...s.btn, ...s.btnPrimary }} disabled={aiBusy || modifications.length === 0}>
+                  {loadingBudget ? 'Optimizing...' : 'Generate budget plan with OpenRouter'}
                 </button>
                 {modifications.length === 0 && <span style={{ fontSize: '13px', color: '#c05621' }}>Generate modifications first</span>}
               </form>
             </div>
 
-            {budgetResult && (
-              <>
-                <div style={{ ...s.card, background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', color: '#fff' }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '20px', textAlign: 'center' }}>
-                    <div>
-                      <div style={{ fontSize: '28px', fontWeight: '700' }}>${(budgetResult.budget || 0).toLocaleString()}</div>
-                      <div style={{ fontSize: '12px', opacity: 0.8 }}>Your Budget</div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: '28px', fontWeight: '700' }}>${(budgetResult.total_cost_estimate || 0).toLocaleString()}</div>
-                      <div style={{ fontSize: '12px', opacity: 0.8 }}>Selected Modifications Cost</div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: '28px', fontWeight: '700' }}>+{budgetResult.total_safety_improvement || 0} pts</div>
-                      <div style={{ fontSize: '12px', opacity: 0.8 }}>Safety Score Improvement</div>
-                    </div>
-                  </div>
-                  {budgetResult.optimization_explanation && (
-                    <p style={{ margin: '16px 0 0', opacity: 0.9, fontSize: '14px', borderTop: '1px solid rgba(255,255,255,0.3)', paddingTop: '12px' }}>
-                      {budgetResult.optimization_explanation}
-                    </p>
-                  )}
-                </div>
-
-                {budgetResult.recommendation && (
-                  <div style={{ ...s.card, background: '#ebf8ff', border: '1px solid #90cdf4' }}>
-                    <strong style={{ color: '#2b6cb0' }}>AI Recommendation: </strong>
-                    <span style={{ color: '#2c5282', fontSize: '14px' }}>{budgetResult.recommendation}</span>
-                  </div>
-                )}
-
-                {budgetResult.selected_modifications?.length > 0 && (
-                  <div style={s.card}>
-                    <h4 style={{ margin: '0 0 12px', color: '#22543d' }}>Selected for This Phase ({budgetResult.selected_modifications.length})</h4>
-                    {budgetResult.selected_modifications.map(m => (
-                      <div key={m.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px', background: '#f0fff4', borderRadius: '6px', marginBottom: '8px' }}>
-                        <div>
-                          <span style={{ fontWeight: '600', textTransform: 'capitalize' }}>{m.modification_type?.replace(/_/g, ' ')} — {m.room}</span>
-                          <div style={{ fontSize: '12px', color: '#718096', marginTop: '2px' }}>{m.aging_benefit}</div>
-                        </div>
-                        <div style={{ fontWeight: '600', color: '#22543d', flexShrink: 0, marginLeft: '12px' }}>
-                          ${Math.round(((m.estimated_cost_min || 0) + (m.estimated_cost_max || 0)) / 2).toLocaleString()}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {budgetResult.deferred_modifications?.length > 0 && (
-                  <div style={s.card}>
-                    <h4 style={{ margin: '0 0 8px', color: '#718096' }}>Deferred to Phase 2 ({budgetResult.deferred_modifications.length})</h4>
-                    {budgetResult.phase_2_cost > 0 && (
-                      <p style={{ margin: '0 0 12px', fontSize: '14px', color: '#4a5568' }}>
-                        Phase 2 estimated cost: <strong>${(budgetResult.phase_2_cost || 0).toLocaleString()}</strong>
-                      </p>
-                    )}
-                    {budgetResult.deferred_modifications.map(m => (
-                      <div key={m.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 10px', background: '#f7fafc', borderRadius: '6px', marginBottom: '6px' }}>
-                        <span style={{ fontSize: '13px', textTransform: 'capitalize', color: '#718096' }}>{m.modification_type?.replace(/_/g, ' ')} — {m.room}</span>
-                        <span style={{ fontSize: '13px', color: '#718096' }}>${Math.round(((m.estimated_cost_min || 0) + (m.estimated_cost_max || 0)) / 2).toLocaleString()}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
+            {budgetResult && <AIReport response={budgetResult} title="Budget planning report"/>}
           </div>
         )}
       </div>

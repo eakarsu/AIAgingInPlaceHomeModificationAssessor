@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import NativeHomeInsights from '../components/NativeHomeInsights';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
+import { readRecordList } from '../services/nativeRecords';
 
 const s = {
   page: { maxWidth: '1100px', margin: '0 auto', padding: '24px' },
@@ -37,27 +39,32 @@ export default function Dashboard() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [homes, setHomes] = useState([]);
+  const [selectedSource,setSelectedSource]=useState(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ address: '', year_built: '', sq_footage: '', num_floors: '1' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [loadError, setLoadError] = useState('');
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ total: 0, totalPages: 1 });
   const LIMIT = 20;
+  const activeLoad=useRef(null);
 
-  useEffect(() => { loadHomes(page); }, [page]);
+  useEffect(() => { loadHomes(page);return()=>{activeLoad.current?.abort();activeLoad.current=null;}; }, [page]);
 
   const loadHomes = async (p = 1) => {
-    setLoading(true);
+    activeLoad.current?.abort();const controller=new AbortController();activeLoad.current=controller;
+    setLoading(true); setLoadError('');
     try {
-      const res = await api.get(`/homes?page=${p}&limit=${LIMIT}`);
-      setHomes(res.data.data || []);
-      if (res.data.pagination) setPagination(res.data.pagination);
+      const res = await api.get(`/homes?page=${p}&limit=${LIMIT}`,{signal:controller.signal});
+      const rows=readRecordList(res.data);if(activeLoad.current!==controller||controller.signal.aborted)return;
+      setHomes(rows);
+      if (res.data.pagination) setPagination(res.data.pagination);else setPagination({total:readRecordList(res.data).length,totalPages:1});
     } catch (err) {
-      console.error('Load homes error:', err);
+      if(activeLoad.current===controller&&!controller.signal.aborted)setLoadError(err.response?.data?.message || err.message || 'Homes could not be loaded.');
     } finally {
-      setLoading(false);
+      if(activeLoad.current===controller&&!controller.signal.aborted){activeLoad.current=null;setLoading(false);}
     }
   };
 
@@ -80,7 +87,8 @@ export default function Dashboard() {
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
   const totalAssessments = homes.reduce((s, h) => s + parseInt(h.assessment_count || 0), 0);
-  const avgScore = homes.length > 0 ? Math.round(homes.reduce((s, h) => s + (h.current_accessibility_score || 0), 0) / homes.length) : 0;
+  const assessedHomes = homes.filter(home => home.latest_assessment_status === 'completed' && home.current_accessibility_score !== null && home.current_accessibility_score !== undefined);
+  const avgScore = assessedHomes.length ? Math.round(assessedHomes.reduce((sum, home) => sum + Number(home.current_accessibility_score), 0) / assessedHomes.length) : null;
 
   return (
     <>
@@ -93,6 +101,8 @@ export default function Dashboard() {
           <a href="/contractors" onClick={e => { e.preventDefault(); navigate('/contractors'); }} style={{ color: '#667eea', textDecoration: 'none', fontSize: '14px', fontWeight: '500' }}>Find Contractors</a>
           <a href="/custom-views" onClick={e => { e.preventDefault(); navigate('/custom-views'); }} style={{ color: '#667eea', textDecoration: 'none', fontSize: '14px', fontWeight: '500' }}>Aging Views</a>
           <a href="/evacuation-readiness" onClick={e => { e.preventDefault(); navigate('/evacuation-readiness'); }} style={{ color: '#667eea', textDecoration: 'none', fontSize: '14px', fontWeight: '500' }}>Evacuation</a>
+          <a href="/codex/operations" onClick={event => { event.preventDefault(); navigate('/codex/operations'); }} style={{ color: '#667eea', textDecoration: 'none', fontSize: '14px' }}>Care Operations</a>
+          <a href="/codex/custom-viz" onClick={event => { event.preventDefault(); navigate('/codex/custom-viz'); }} style={{ color: '#667eea', textDecoration: 'none', fontSize: '14px' }}>Record Insights</a>
           <span style={{ color: '#718096', fontSize: '14px' }}>Hello, {user?.name}</span>
           <button style={{ ...s.btn, ...s.btnSecondary, padding: '6px 14px' }} onClick={() => { logout(); navigate('/login'); }}>Sign Out</button>
         </div>
@@ -108,13 +118,15 @@ export default function Dashboard() {
         </div>
 
         <div style={s.statsGrid}>
-          <div style={s.stat}><div style={s.statVal}>{homes.length}</div><div style={s.statLabel}>Homes Registered</div></div>
-          <div style={s.stat}><div style={s.statVal}>{totalAssessments}</div><div style={s.statLabel}>Total Assessments</div></div>
-          <div style={s.stat}><div style={s.statVal}>{avgScore}/100</div><div style={s.statLabel}>Avg Accessibility Score</div></div>
+          <div style={s.stat}><div style={s.statVal}>{loading?'Loading…':loadError?'Unavailable':pagination.total}</div><div style={s.statLabel}>Homes Registered</div></div>
+          <div style={s.stat}><div style={s.statVal}>{loading?'Loading…':loadError?'Unavailable':totalAssessments}</div><div style={s.statLabel}>Assessments on this page</div></div>
+          <div style={s.stat}><div style={s.statVal}>{loading?'Loading…':loadError?'Unavailable':avgScore === null ? 'Not assessed' : `${avgScore}/100`}</div><div style={s.statLabel}>Avg Accessibility Score</div></div>
         </div>
 
         {loading ? (
           <div style={{ textAlign: 'center', padding: '60px', color: '#718096' }}>Loading homes...</div>
+        ) : loadError ? (
+          <div role="alert" style={s.emptyState}><strong>Homes could not be loaded.</strong><p>{loadError}</p><button type="button" style={{ ...s.btn, ...s.btnSecondary }} onClick={() => loadHomes(page)}>Retry</button></div>
         ) : homes.length === 0 ? (
           <div style={s.emptyState}>
             <div style={{ fontSize: '48px', marginBottom: '16px' }}>🏠</div>
@@ -126,12 +138,12 @@ export default function Dashboard() {
           <>
           <div style={s.grid}>
             {homes.map(home => (
-              <div key={home.id} style={s.card} onClick={() => navigate(`/homes/${home.id}`)}
+              <div key={home.id} style={s.card} role="button" tabIndex={0} aria-label={'Open native home '+home.address} onClick={() => setSelectedSource(home.id)} onKeyDown={event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();setSelectedSource(home.id);}}}
                 onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)'; }}
                 onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = '0 1px 4px rgba(0,0,0,0.1)'; }}>
                 <div style={{ fontSize: '28px', marginBottom: '8px' }}>🏠</div>
                 <div style={s.address}>{home.address}</div>
-                <div style={s.score}>{home.current_accessibility_score || 0}<span style={{ fontSize: '14px', color: '#718096', fontWeight: '400' }}>/100</span></div>
+                <div style={s.score}>{home.latest_assessment_status === 'completed' && home.current_accessibility_score != null ? `${home.current_accessibility_score}/100` : 'Not assessed'}</div>
                 <div style={{ fontSize: '12px', color: '#718096', marginBottom: '12px' }}>Accessibility Score</div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ ...s.badge, background: statusColor(home.latest_assessment_status), color: statusTextColor(home.latest_assessment_status) }}>
@@ -154,6 +166,7 @@ export default function Dashboard() {
         )}
       </div>
 
+      {selectedSource&&<NativeHomeInsights key={selectedSource} initialSourceId={selectedSource} onlyDialog onClose={()=>setSelectedSource(null)} onChanged={()=>loadHomes(page)}/>}
       {showAdd && (
         <div style={s.modal} onClick={() => setShowAdd(false)}>
           <div style={s.modalCard} onClick={e => e.stopPropagation()}>

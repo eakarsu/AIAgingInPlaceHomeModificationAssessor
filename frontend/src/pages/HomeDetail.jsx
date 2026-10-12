@@ -1,6 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import FullFieldPresets from '../components/FullFieldPresets';
+import AIReport from '../components/AIReport';
+import NativeAssessmentRecord from '../components/NativeAssessmentRecord';
+import useNativeAI from '../services/useNativeAI';
+import {clinicalExamples,ageValue} from '../services/nativeExamples';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../api/client';
+import { readRecordList } from '../services/nativeRecords';
 
 const s = {
   page: { maxWidth: '1100px', margin: '0 auto', padding: '24px' },
@@ -20,6 +26,8 @@ const s = {
   tabActive: { color: '#667eea', borderBottom: '2px solid #667eea' },
 };
 
+const money = value => value === null || value === undefined ? 'Not estimated' : `$${Number(value).toLocaleString()}`;
+
 const priorityColor = (p) => {
   if (p <= 2) return { bg: '#fff5f5', text: '#c53030' };
   if (p <= 5) return { bg: '#fffaf0', text: '#c05621' };
@@ -31,11 +39,14 @@ const statusText = { recommended: '#2b6cb0', planned: '#744210', in_progress: '#
 
 export default function HomeDetail() {
   const { id } = useParams();
+  const {post:aiPost,cancel:cancelAI,busy:aiBusy}=useNativeAI(id);
+  const [nativeReport,setNativeReport]=useState(null);
   const navigate = useNavigate();
   const [home, setHome] = useState(null);
   const [assessments, setAssessments] = useState([]);
   const [modifications, setModifications] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [activeTab, setActiveTab] = useState('assessments');
   const [runningAssessment, setRunningAssessment] = useState(false);
   const [streamMods, setStreamMods] = useState([]);
@@ -44,6 +55,10 @@ export default function HomeDetail() {
   const [showAssessForm, setShowAssessForm] = useState(false);
   const [activeAssessmentId, setActiveAssessmentId] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
+  const [selectedRecord, setSelectedRecord] = useState(null);
+  const streamRequest = useRef(null);
+  const cancelStream = () => { streamRequest.current?.close(); streamRequest.current = null; setStreaming(false); };
+  useEffect(() => () => { streamRequest.current?.close(); streamRequest.current = null; }, [id]);
 
   // Resident profile state
   const [profile, setProfile] = useState(null);
@@ -60,58 +75,19 @@ export default function HomeDetail() {
   // Budget state
   const [budget, setBudget] = useState(null);
 
-  useEffect(() => { loadData(); }, [id]);
-
-  const loadData = async () => {
-    try {
-      const [homeRes, assessRes] = await Promise.all([
-        api.get(`/homes/${id}`),
-        api.get(`/assessments?home_id=${id}`),
-      ]);
-      setHome(homeRes.data.home);
-      const homeAssessments = assessRes.data.data || [];
-      setAssessments(homeAssessments);
-
-      const completed = homeAssessments.find(a => a.status === 'completed');
-      if (completed) {
-        setActiveAssessmentId(completed.id);
-        const modRes = await api.get(`/modifications?assessmentId=${completed.id}`);
-        setModifications(modRes.data.data || []);
-      }
-
-      // Load resident profile (may 404 if not set yet)
-      try {
-        const profileRes = await api.get(`/profiles/${id}`);
-        const p = profileRes.data.profile;
-        setProfile(p);
-        setProfileForm({
-          resident_name: p.resident_name || '',
-          age: p.age || '',
-          mobility_issues: p.mobility_issues || '',
-          vision_issues: p.vision_issues || '',
-          balance_issues: p.balance_issues || '',
-          medical_notes: p.medical_notes || '',
-        });
-      } catch (_) { /* no profile yet */ }
-
-      // Load fall risk history
-      try {
-        const frRes = await api.get(`/fall-risk-history?home_id=${id}`);
-        const history = frRes.data.data || [];
-        setFallRiskHistory(history);
-        if (history.length > 0) setLatestFallRisk(history[0]);
-      } catch (_) {}
-
-      // Load budget summary
-      try {
-        const budgetRes = await api.get(`/homes/${id}/budget`);
-        setBudget(budgetRes.data);
-      } catch (_) {}
-    } catch (err) {
-      console.error('Load error:', err);
-    } finally {
-      setLoading(false);
-    }
+  const dataRequest=useRef(null);
+  useEffect(()=>{cancelAI();cancelStream();setSelectedRecord(null);setNativeReport(null);setAssessForm({resident_age:'',mobility_issues:'',vision_issues:'',balance_issues:'',photos_description:''});setFallRiskForm({age:'',mobility_issues:'',vision_issues:'',balance_issues:'',medications:'',fall_history:''});loadData();return()=>{dataRequest.current?.abort();dataRequest.current=null;};},[id]);
+  const loadData=async()=>{
+    dataRequest.current?.abort();const controller=new AbortController();dataRequest.current=controller;const options={signal:controller.signal};setLoading(true);setLoadError('');
+    try{
+      const [homeRes,assessRes,profileRes,fallRes,budgetRes]=await Promise.all([api.get(`/homes/${id}`,options),api.get(`/assessments?home_id=${id}`,options),api.get(`/profiles/${id}`,options).catch(failure=>{if(failure.response?.status===404)return{data:{profile:null}};throw failure;}),api.get(`/fall-risk-history?home_id=${id}`,options),api.get(`/homes/${id}/budget`,options)]);
+      if(!homeRes.data.home?.id||String(homeRes.data.home.id)!==String(id))throw Error('The home service returned an invalid source record.');
+      const rows=readRecordList(assessRes.data),history=readRecordList(fallRes.data),source=rows.find(row=>row.status==='completed')||rows[0];
+      const modifications=source?readRecordList((await api.get(`/modifications?assessmentId=${source.id}`,options)).data):[];
+      if(dataRequest.current!==controller||controller.signal.aborted)return;
+      const saved=profileRes.data.profile;setHome(homeRes.data.home);setAssessments(rows);setModifications(modifications);setActiveAssessmentId(source?.id||null);setProfile(saved);setProfileForm({resident_name:saved?.resident_name||'',age:saved?.age??'',mobility_issues:saved?.mobility_issues||'',vision_issues:saved?.vision_issues||'',balance_issues:saved?.balance_issues||'',medical_notes:saved?.medical_notes||''});setFallRiskHistory(history);setLatestFallRisk(history[0]||null);setBudget(budgetRes.data);
+    }catch(failure){if(dataRequest.current===controller&&!controller.signal.aborted)setLoadError(failure.response?.data?.message||failure.message||'Home data could not be loaded.');}
+    finally{if(dataRequest.current===controller&&!controller.signal.aborted){dataRequest.current=null;setLoading(false);}}
   };
 
   const runAssessment = async (e) => {
@@ -119,9 +95,9 @@ export default function HomeDetail() {
     setRunningAssessment(true);
     setErrorMsg('');
     try {
-      const res = await api.post('/ai/assess-home', {
+      const res = await aiPost('/ai/assess-home', {
         home_id: parseInt(id),
-        resident_age: assessForm.resident_age ? parseInt(assessForm.resident_age) : undefined,
+        resident_age: ageValue(assessForm.resident_age),
         mobility_issues: assessForm.mobility_issues || undefined,
         vision_issues: assessForm.vision_issues || undefined,
         balance_issues: assessForm.balance_issues || undefined,
@@ -129,41 +105,35 @@ export default function HomeDetail() {
       });
       setShowAssessForm(false);
       await loadData();
-      if (res.data.assessment?.id) {
-        setActiveAssessmentId(res.data.assessment.id);
-        await api.post('/ai/recommend-modifications', { assessment_id: res.data.assessment.id });
-        await loadData();
-      }
+      setNativeReport(res.data.assessment?.ai_result || res.data);
+      if(res.data.assessment?.id)setActiveAssessmentId(res.data.assessment.id);
     } catch (err) {
-      setErrorMsg(err.response?.data?.message || 'Assessment failed');
+      if(err.name==='AbortError'||err.code==='ERR_CANCELED')return;
+      setErrorMsg(err.response?.data?.message || err.message || 'Assessment failed');
     } finally {
       setRunningAssessment(false);
     }
   };
 
   const streamModifications = async () => {
-    if (!activeAssessmentId) return;
-    setStreaming(true);
-    setStreamMods([]);
+    if (!activeAssessmentId || streamRequest.current) return;
+    setStreaming(true); setStreamMods([]); setErrorMsg('');
     try {
       const token = localStorage.getItem('token');
-      const es = new EventSource(`/api/ai/modifications/stream?assessmentId=${activeAssessmentId}&token=${token}`);
-      es.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'modification') {
-          setStreamMods(prev => [...prev, data.modification]);
-        } else if (data.type === 'complete') {
-          es.close();
-          setStreaming(false);
-          loadData();
-        } else if (data.type === 'error' || data.error) {
-          console.error('SSE error:', data);
-        }
+      const es = new EventSource(`/api/ai/modifications/stream?assessmentId=${activeAssessmentId}&token=${encodeURIComponent(token || '')}`);
+      streamRequest.current = es;
+      const fail = message => { if (streamRequest.current !== es) return; cancelStream(); setErrorMsg(message); };
+      es.onmessage = event => {
+        if (streamRequest.current !== es) return;
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'modification') setStreamMods(previous => [...previous, data.modification]);
+          else if (data.type === 'complete') { cancelStream(); loadData(); }
+          else if (data.type === 'error' || data.error) fail(data.message || data.error || 'Modification generation failed. Try again.');
+        } catch (_) { fail('The modification stream returned an invalid response. Try again.'); }
       };
-      es.onerror = () => { es.close(); setStreaming(false); };
-    } catch (err) {
-      setStreaming(false);
-    }
+      es.onerror = () => fail('The modification stream could not be loaded. Try again.');
+    } catch (failure) { cancelStream(); setErrorMsg(failure.message || 'Modification generation failed. Try again.'); }
   };
 
   const updateModStatus = async (modId, status) => {
@@ -201,10 +171,10 @@ export default function HomeDetail() {
     e.preventDefault();
     setRunningFallRisk(true);
     try {
-      const res = await api.post('/ai/fall-risk-assessment', {
+      const res = await aiPost('/ai/fall-risk-assessment', {
         home_id: parseInt(id),
         resident_profile: {
-          age: fallRiskForm.age ? parseInt(fallRiskForm.age) : undefined,
+          age: ageValue(fallRiskForm.age),
           mobility_issues: fallRiskForm.mobility_issues || undefined,
           vision_issues: fallRiskForm.vision_issues || undefined,
           balance_issues: fallRiskForm.balance_issues || undefined,
@@ -213,9 +183,11 @@ export default function HomeDetail() {
         },
       });
       setLatestFallRisk(res.data);
+      setNativeReport(res.data);
       await loadData();
     } catch (err) {
-      setErrorMsg(err.response?.data?.message || 'Fall risk assessment failed');
+      if(err.name==='AbortError'||err.code==='ERR_CANCELED')return;
+      setErrorMsg(err.response?.data?.message || err.message || 'Fall risk assessment failed');
     } finally {
       setRunningFallRisk(false);
     }
@@ -226,6 +198,7 @@ export default function HomeDetail() {
   const setFRF = (k, v) => setFallRiskForm(p => ({ ...p, [k]: v }));
 
   if (loading) return <div style={{ textAlign: 'center', padding: '80px', color: '#718096' }}>Loading...</div>;
+  if (loadError) return <div role="alert" style={s.card}><h1>Home data could not be loaded</h1><p>{loadError}</p><button type="button" style={{ ...s.btn, ...s.btnSecondary }} onClick={loadData}>Retry</button></div>;
   if (!home) return <div style={{ textAlign: 'center', padding: '80px' }}>Home not found</div>;
 
   const latestAssessment = assessments[0];
@@ -249,7 +222,10 @@ export default function HomeDetail() {
         </div>
       </nav>
 
+      {selectedRecord && <NativeAssessmentRecord kind={selectedRecord.kind} recordId={selectedRecord.id} onClose={() => setSelectedRecord(null)} onChanged={loadData} onOpenAssessment={source => navigate('/assessments/'+source)}/>}
       <div style={s.page}>
+        {aiBusy&&<div role="status" className="ai-loading">Generating with OpenRouter… <button type="button" style={{...s.btn,...s.btnSecondary}} onClick={cancelAI}>Cancel AI request</button></div>}
+        {nativeReport&&<AIReport response={nativeReport} title="Home planning AI response"/>}
         {/* Home Info */}
         <div style={s.card}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -260,7 +236,7 @@ export default function HomeDetail() {
               </p>
             </div>
             <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: '36px', fontWeight: '700', color: '#667eea' }}>{home.current_accessibility_score || 0}</div>
+              <div style={{ fontSize: '36px', fontWeight: '700', color: '#667eea' }}>{home.current_accessibility_score == null ? 'Not assessed' : home.current_accessibility_score}</div>
               <div style={{ fontSize: '12px', color: '#718096' }}>Accessibility Score / 100</div>
             </div>
           </div>
@@ -296,14 +272,14 @@ export default function HomeDetail() {
             </div>
 
             {showAssessForm && (
-              <form onSubmit={runAssessment} style={{ marginBottom: '20px', background: '#f7fafc', padding: '16px', borderRadius: '8px' }}>
-                <h4 style={{ margin: '0 0 12px', fontSize: '14px' }}>Resident Profile (for this assessment)</h4>
+              <form data-native-ai="assessment" onSubmit={runAssessment} style={{ marginBottom: '20px', background: '#f7fafc', padding: '16px', borderRadius: '8px' }}>
+                <FullFieldPresets value={assessForm} onChange={setAssessForm} presets={clinicalExamples(profile,'assessment')} disabled={aiBusy}/><p className="ai-muted">Examples preserve saved clinical facts and fill unknown fields explicitly. Review before generating; no inspection or consent is implied.</p><h4 style={{ margin: '0 0 12px', fontSize: '14px' }}>Resident Profile (for this assessment)</h4>
                 {profile && (
                   <div style={{ fontSize: '12px', color: '#2b6cb0', background: '#ebf8ff', padding: '6px 10px', borderRadius: '6px', marginBottom: '10px' }}>
-                    Pre-filled from saved resident profile. Modify to override.
+                    Use a complete example to copy the saved resident facts, or enter verified observations.
                   </div>
                 )}
-                {[['resident_age', 'Resident Age', 'number', profile?.age || '72'], ['mobility_issues', 'Mobility Issues', 'text', profile?.mobility_issues || 'Uses walker'], ['vision_issues', 'Vision Issues', 'text', profile?.vision_issues || 'Mild cataracts'], ['balance_issues', 'Balance Issues', 'text', profile?.balance_issues || 'Occasional dizziness']].map(([k, l, t, ph]) => (
+                {[['resident_age', 'Resident Age (or Unknown)', 'text', profile?.age || '72'], ['mobility_issues', 'Mobility Issues', 'text', profile?.mobility_issues || 'Uses walker'], ['vision_issues', 'Vision Issues', 'text', profile?.vision_issues || 'Mild cataracts'], ['balance_issues', 'Balance Issues', 'text', profile?.balance_issues || 'Occasional dizziness']].map(([k, l, t, ph]) => (
                   <div key={k} style={{ marginBottom: '10px' }}>
                     <label style={{ fontSize: '12px', fontWeight: '600', color: '#4a5568', display: 'block', marginBottom: '4px' }}>{l}</label>
                     <input type={t} value={assessForm[k]} onChange={e => setField(k, e.target.value)} placeholder={ph}
@@ -317,9 +293,9 @@ export default function HomeDetail() {
                     rows={3} style={{ ...s.input, resize: 'vertical' }} />
                 </div>
                 <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-                  <button type="button" style={{ ...s.btn, ...s.btnSecondary, padding: '8px 16px', fontSize: '13px' }} onClick={() => setShowAssessForm(false)}>Cancel</button>
-                  <button type="submit" style={{ ...s.btn, ...s.btnPrimary, padding: '8px 16px', fontSize: '13px' }} disabled={runningAssessment}>
-                    {runningAssessment ? 'Assessing (may take ~30s)...' : 'Run Assessment'}
+                  <button type="button" style={{ ...s.btn, ...s.btnSecondary, padding: '8px 16px', fontSize: '13px' }} onClick={() => {cancelAI();setShowAssessForm(false);}}>Cancel</button>
+                  <button type="submit" style={{ ...s.btn, ...s.btnPrimary, padding: '8px 16px', fontSize: '13px' }} disabled={aiBusy}>
+                    {runningAssessment ? 'Assessing (may take ~30s)...' : 'Generate assessment with OpenRouter'}
                   </button>
                 </div>
               </form>
@@ -328,7 +304,7 @@ export default function HomeDetail() {
             {assessments.length === 0 ? (
               <p style={{ color: '#718096', fontSize: '14px' }}>No assessments yet. Run your first AI assessment above.</p>
             ) : assessments.map(a => (
-              <div key={a.id} onClick={() => navigate(`/assessments/${a.id}`)}
+              <div key={a.id} role="button" tabIndex={0} aria-label={`Open assessment #${a.id}`} onKeyDown={event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();setSelectedRecord({kind:'assessment',id:a.id});}}} onClick={() => setSelectedRecord({kind:"assessment",id:a.id})}
                 style={{ padding: '12px', border: '1px solid #e2e8f0', borderRadius: '8px', marginBottom: '8px', cursor: 'pointer', transition: 'background 0.1s' }}
                 onMouseEnter={e => e.currentTarget.style.background = '#f7fafc'}
                 onMouseLeave={e => e.currentTarget.style.background = ''}>
@@ -337,7 +313,7 @@ export default function HomeDetail() {
                   <span style={{ ...s.badge, background: a.status === 'completed' ? '#c6f6d5' : '#fef3c7', color: a.status === 'completed' ? '#22543d' : '#92400e' }}>{a.status}</span>
                 </div>
                 <div style={{ fontSize: '13px', color: '#718096', marginTop: '4px' }}>
-                  Safety Score: <strong>{a.safety_score || 'N/A'}</strong> • Urgency: <strong style={{ textTransform: 'capitalize' }}>{a.urgency_level || 'N/A'}</strong>
+                  Safety Score: <strong>{a.safety_score ?? 'Not assessed'}</strong> • Urgency: <strong style={{ textTransform: 'capitalize' }}>{a.urgency_level || 'Not assessed'}</strong>
                 </div>
                 <div style={{ fontSize: '12px', color: '#a0aec0', marginTop: '2px' }}>{new Date(a.created_at).toLocaleDateString()}</div>
               </div>
@@ -352,11 +328,12 @@ export default function HomeDetail() {
               <h3 style={{ margin: 0 }}>Recommended Modifications</h3>
               {activeAssessmentId && (
                 <button style={{ ...s.btn, ...s.btnSecondary, padding: '6px 12px', fontSize: '12px' }} onClick={streamModifications} disabled={streaming}>
-                  {streaming ? 'Streaming...' : 'Stream New Mods'}
+                  {streaming ? 'Streaming...' : 'Generate modifications with OpenRouter'}
                 </button>
               )}
             </div>
 
+            {streaming && <button type="button" style={{...s.btn,...s.btnSecondary}} onClick={cancelStream}>Cancel modification generation</button>}
             {streaming && streamMods.length > 0 && (
               <div style={{ marginBottom: '16px' }}>
                 <p style={{ fontSize: '13px', color: '#667eea', fontWeight: '600', marginBottom: '8px' }}>Live modifications loading...</p>
@@ -379,7 +356,7 @@ export default function HomeDetail() {
                     <div style={{ fontSize: '13px', color: '#4a5568' }}>{m.room} — {m.description}</div>
                     {(m.estimated_cost_min || m.estimated_cost_max) && (
                       <div style={{ fontSize: '12px', color: '#718096', marginTop: '4px' }}>
-                        Est. ${(m.estimated_cost_min || 0).toLocaleString()} – ${(m.estimated_cost_max || 0).toLocaleString()}
+                        Est. {money(m.estimated_cost_min)} – {money(m.estimated_cost_max)}
                       </div>
                     )}
                     {m.completion_pct > 0 && (
@@ -392,6 +369,7 @@ export default function HomeDetail() {
                     )}
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginLeft: '12px', flexShrink: 0 }}>
+                    <button type="button" style={{...s.btn,...s.btnSecondary,padding:'4px 10px',fontSize:'12px'}} onClick={() => setSelectedRecord({kind:'modification',id:m.id})}>Open details</button>
                     {m.status === 'recommended' && <button style={{ ...s.btn, ...s.btnPrimary, padding: '4px 10px', fontSize: '12px' }} onClick={() => updateModStatus(m.id, 'planned')}>Plan</button>}
                     {m.status === 'planned' && <button style={{ ...s.btn, background: '#ed8936', color: '#fff', padding: '4px 10px', fontSize: '12px' }} onClick={() => updateModStatus(m.id, 'in_progress')}>Start</button>}
                     {m.status === 'in_progress' && <button style={{ ...s.btn, ...s.btnGreen, padding: '4px 10px', fontSize: '12px' }} onClick={() => updateModStatus(m.id, 'completed')}>Done</button>}
@@ -453,11 +431,11 @@ export default function HomeDetail() {
               <p style={{ margin: '0 0 16px', fontSize: '14px', color: '#718096' }}>
                 AI analyzes home hazards and resident profile to predict fall risk and recommend interventions.
               </p>
-              <form onSubmit={runFallRisk}>
+              <form data-native-ai="fall-risk" onSubmit={runFallRisk}><FullFieldPresets value={fallRiskForm} onChange={setFallRiskForm} presets={clinicalExamples(profile,'fall-risk')} disabled={aiBusy}/><p className="ai-muted">Each choice fills every field from saved facts or an explicit unknown. Review before generating.</p>
                 <div style={{ background: '#f7fafc', padding: '16px', borderRadius: '8px', marginBottom: '16px' }}>
                   <h4 style={{ margin: '0 0 12px', fontSize: '13px', color: '#4a5568' }}>Resident Details (overrides saved profile)</h4>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                    {[['age', 'Age', 'number', profile?.age || '72'],
+                    {[['age', 'Age (or Unknown)', 'text', profile?.age || '72'],
                       ['medications', 'Medications', 'text', 'e.g. blood thinners, diuretics'],
                       ['mobility_issues', 'Mobility Issues', 'text', profile?.mobility_issues || 'Uses walker'],
                       ['fall_history', 'Fall History', 'text', 'e.g. 2 falls in past year'],
@@ -470,86 +448,27 @@ export default function HomeDetail() {
                     ))}
                   </div>
                 </div>
-                <button type="submit" style={{ ...s.btn, ...s.btnPrimary }} disabled={runningFallRisk}>
-                  {runningFallRisk ? 'Analyzing (may take ~30s)...' : 'Run Fall Risk Assessment'}
+                <button type="submit" style={{ ...s.btn, ...s.btnPrimary }} disabled={aiBusy}>
+                  {runningFallRisk ? 'Analyzing (may take ~30s)...' : 'Generate fall risk report with OpenRouter'}
                 </button>
               </form>
             </div>
 
-            {latestFallRisk && (
-              <>
-                <div style={{ ...s.card, background: riskBg[latestFallRisk.risk_category] || '#f7fafc', border: `1px solid ${riskBg[latestFallRisk.risk_category] || '#e2e8f0'}` }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                    <div>
-                      <div style={{ fontSize: '36px', fontWeight: '800', color: riskColor[latestFallRisk.risk_category] || '#2d3748' }}>
-                        {latestFallRisk.fall_risk_score || latestFallRisk.ai_result?.fall_risk_score}/100
-                      </div>
-                      <div style={{ fontSize: '13px', color: riskColor[latestFallRisk.risk_category] || '#718096', textTransform: 'capitalize', fontWeight: '600' }}>
-                        {latestFallRisk.risk_category || latestFallRisk.ai_result?.risk_category} Risk
-                      </div>
-                    </div>
-                    <div style={{ textAlign: 'right', fontSize: '13px', color: riskColor[latestFallRisk.risk_category] || '#4a5568' }}>
-                      <div>Annual probability: <strong>{((latestFallRisk.annual_fall_probability || latestFallRisk.ai_result?.annual_fall_probability || 0) * 100).toFixed(0)}%</strong></div>
-                      {(latestFallRisk.five_year_fall_probability || latestFallRisk.ai_result?.five_year_fall_probability) && (
-                        <div>5-year probability: <strong>{((latestFallRisk.five_year_fall_probability || latestFallRisk.ai_result?.five_year_fall_probability) * 100).toFixed(0)}%</strong></div>
-                      )}
-                    </div>
-                  </div>
-                  {(latestFallRisk.ai_result?.summary) && (
-                    <p style={{ margin: 0, fontSize: '14px', color: riskColor[latestFallRisk.risk_category] || '#4a5568' }}>{latestFallRisk.ai_result.summary}</p>
-                  )}
-                </div>
-
-                {latestFallRisk.ai_result?.top_hazard_locations?.length > 0 && (
-                  <div style={s.card}>
-                    <h4 style={{ margin: '0 0 12px' }}>Top Hazard Locations</h4>
-                    {latestFallRisk.ai_result.top_hazard_locations.map((h, i) => (
-                      <div key={i} style={{ display: 'flex', gap: '12px', padding: '10px', background: '#f7fafc', borderRadius: '8px', marginBottom: '8px', alignItems: 'flex-start' }}>
-                        <div style={{ width: '36px', height: '36px', background: '#fc8181', color: '#fff', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '700', fontSize: '13px', flexShrink: 0 }}>
-                          {h.risk_contribution || i + 1}%
-                        </div>
-                        <div>
-                          <div style={{ fontWeight: '600', textTransform: 'capitalize', marginBottom: '2px' }}>{h.location}</div>
-                          <div style={{ fontSize: '13px', color: '#c53030', marginBottom: '4px' }}>{h.hazard}</div>
-                          <div style={{ fontSize: '13px', color: '#2b6cb0' }}>→ {h.intervention}</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {latestFallRisk.ai_result?.immediate_interventions?.length > 0 && (
-                  <div style={{ ...s.card, background: '#fff5f5', border: '1px solid #fc8181' }}>
-                    <h4 style={{ margin: '0 0 10px', color: '#c53030' }}>Immediate Interventions</h4>
-                    {latestFallRisk.ai_result.immediate_interventions.map((action, i) => (
-                      <div key={i} style={{ fontSize: '14px', color: '#c53030', marginBottom: '6px' }}>• {action}</div>
-                    ))}
-                  </div>
-                )}
-
-                {latestFallRisk.ai_result?.prevention_roi && (
-                  <div style={{ ...s.card, background: '#ebf8ff', border: '1px solid #90cdf4' }}>
-                    <strong style={{ color: '#2b6cb0' }}>ROI of Prevention: </strong>
-                    <span style={{ color: '#2c5282', fontSize: '14px' }}>{latestFallRisk.ai_result.prevention_roi}</span>
-                  </div>
-                )}
-
-                {fallRiskHistory.length > 1 && (
+            {latestFallRisk && <>{latestFallRisk.ai_result?<AIReport response={latestFallRisk.ai_result} title="Saved fall risk report"/>:<p className="ai-muted">Saved planning draft · Not assessed. No provider answer or clinical risk score has been generated.</p>}{fallRiskHistory.length > 0 && (
                   <div style={s.card}>
                     <h4 style={{ margin: '0 0 12px' }}>Fall Risk History</h4>
                     <div style={{ display: 'flex', gap: '8px', overflowX: 'auto' }}>
                       {fallRiskHistory.map((entry, i) => (
                         <div key={entry.id} style={{ flexShrink: 0, textAlign: 'center', padding: '10px 14px', background: riskBg[entry.risk_category] || '#f7fafc', borderRadius: '8px', minWidth: '80px' }}>
-                          <div style={{ fontSize: '20px', fontWeight: '700', color: riskColor[entry.risk_category] || '#2d3748' }}>{entry.fall_risk_score}</div>
-                          <div style={{ fontSize: '11px', color: '#718096', textTransform: 'capitalize', marginBottom: '2px' }}>{entry.risk_category}</div>
+                          <div style={{ fontSize: '20px', fontWeight: '700', color: riskColor[entry.risk_category] || '#2d3748' }}>{entry.fall_risk_score ?? 'Not assessed'}</div>
+                          <div style={{ fontSize: '11px', color: '#718096', textTransform: 'capitalize', marginBottom: '2px' }}>{entry.risk_category || 'Planning draft · no generated answer'}</div>
+                          {entry.planning_notes&&<p style={{maxWidth:220,fontSize:11}}>{entry.planning_notes}</p>}
                           <div style={{ fontSize: '10px', color: '#a0aec0' }}>{new Date(entry.created_at).toLocaleDateString()}</div>
                         </div>
                       ))}
                     </div>
                   </div>
-                )}
-              </>
-            )}
+                )}</>}
           </div>
         )}
 
@@ -565,11 +484,11 @@ export default function HomeDetail() {
                       <div style={{ fontSize: '13px', color: '#718096' }}>Pending Modifications</div>
                     </div>
                     <div>
-                      <div style={{ fontSize: '28px', fontWeight: '700', color: '#22543d' }}>${(budget.estimated_total_min || 0).toLocaleString()}</div>
+                      <div style={{ fontSize: '28px', fontWeight: '700', color: '#22543d' }}>{money(budget.estimated_total_min)}</div>
                       <div style={{ fontSize: '13px', color: '#718096' }}>Min Estimate</div>
                     </div>
                     <div>
-                      <div style={{ fontSize: '28px', fontWeight: '700', color: '#c05621' }}>${(budget.estimated_total_max || 0).toLocaleString()}</div>
+                      <div style={{ fontSize: '28px', fontWeight: '700', color: '#c05621' }}>{money(budget.estimated_total_max)}</div>
                       <div style={{ fontSize: '13px', color: '#718096' }}>Max Estimate</div>
                     </div>
                   </div>
@@ -589,7 +508,7 @@ export default function HomeDetail() {
                       </div>
                       <div style={{ textAlign: 'right', flexShrink: 0, marginLeft: '12px' }}>
                         <div style={{ fontWeight: '600', fontSize: '14px' }}>
-                          ${(m.estimated_cost_min || 0).toLocaleString()} – ${(m.estimated_cost_max || 0).toLocaleString()}
+                          {money(m.estimated_cost_min)} – {money(m.estimated_cost_max)}
                         </div>
                         {m.timeline_days && <div style={{ fontSize: '12px', color: '#718096' }}>{m.timeline_days} days</div>}
                       </div>

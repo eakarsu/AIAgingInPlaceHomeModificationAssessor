@@ -1,3 +1,4 @@
+import NativeLayout from "./components/NativeLayout";
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -15,13 +16,13 @@ import CodexOperationsFeature from './pages/CodexOperationsFeature';
 function ProtectedRoute({ children }) {
   const { isAuthenticated } = useAuth();
   if (!isAuthenticated) return <Navigate to="/login" replace />;
-  return children;
+  return <NativeLayout>{children}</NativeLayout>;
 }
 
 function AppRoutes() {
   const { isAuthenticated } = useAuth();
   return (
-    <Routes>
+    <><Routes>
         <Route path="/codex/custom-viz" element={<ProtectedRoute><CodexCustomVizFeature /></ProtectedRoute>} />
         <Route path="/codex/operations" element={<ProtectedRoute><CodexOperationsFeature /></ProtectedRoute>} />
 
@@ -33,7 +34,7 @@ function AppRoutes() {
       <Route path="/custom-views" element={<ProtectedRoute><CustomViewsPage /></ProtectedRoute>} />
       <Route path="/evacuation-readiness" element={<ProtectedRoute><EvacuationReadiness /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    </Routes></>
   );
 }
 
