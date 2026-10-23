@@ -8,6 +8,7 @@ import HomeDetail from './pages/HomeDetail';
 import AssessmentResults from './pages/AssessmentResults';
 import Contractors from './pages/Contractors';
 import CustomViewsPage from './pages/CustomViewsPage';
+import FeaturePackPage from './pages/FeaturePackPage';
 import EvacuationReadiness from './pages/EvacuationReadiness';
 
 import CodexCustomVizFeature from './pages/CodexCustomVizFeature';
@@ -32,6 +33,7 @@ function AppRoutes() {
       <Route path="/assessments/:id" element={<ProtectedRoute><AssessmentResults /></ProtectedRoute>} />
       <Route path="/contractors" element={<ProtectedRoute><Contractors /></ProtectedRoute>} />
       <Route path="/custom-views" element={<ProtectedRoute><CustomViewsPage /></ProtectedRoute>} />
+      <Route path="/feature-pack" element={<ProtectedRoute><FeaturePackPage /></ProtectedRoute>} />
       <Route path="/evacuation-readiness" element={<ProtectedRoute><EvacuationReadiness /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes></>

@@ -26,6 +26,17 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
+  const demoEmail = import.meta.env.VITE_DEMO_EMAIL;
+  const demoPassword = import.meta.env.VITE_DEMO_PASSWORD;
+  const fillDemoCredentials = async () => {
+    if (demoEmail && demoPassword) { setMode('login'); setForm(current => ({ ...current, email: demoEmail, password: demoPassword })); return; }
+    try {
+      const res = await fetch('/api/auth/demo-credentials', { cache: 'no-store' });
+      const data = await res.json();
+      if (data?.email && data?.password) { setMode('login'); setForm(current => ({ ...current, email: data.email, password: data.password })); return; }
+    } catch {}
+    setError("Demo credentials are not configured for this environment.");
+  };
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
 
@@ -85,24 +96,13 @@ export default function Login() {
             </div>
           )}
           <button
-            type="button"
-            onClick={async () => {
-              if (loading) return;
-              setLoading(true); setError('');
-              try {
-                const credentials = (await api.get('/auth/demo-credentials')).data;
-                setMode('login'); setForm(current => ({ ...current, email: credentials.email, password: credentials.password }));
-                const response = await api.post('/auth/login', credentials);
-                login(response.data.token, response.data.user); navigate('/');
-              } catch (failure) { setError(failure.response?.data?.message || failure.response?.data?.error || 'Demo login failed.'); }
-              finally { setLoading(false); }
-            }}
-            disabled={loading}
-            aria-label="Log In as Demo"
-            style={{ width: '100%', marginBottom: '12px', padding: '10px 14px', borderRadius: '8px', border: '1px solid currentColor', background: 'transparent', cursor: 'pointer' }}
-          >
-            Log In as Demo
-          </button>
+              type="button"
+              onClick={fillDemoCredentials}
+              aria-label="Fill demo credentials"
+              style={{ width: '100%', marginBottom: '12px', padding: '10px 14px', borderRadius: '8px', border: '1px solid currentColor', background: 'transparent', cursor: 'pointer' }}
+            >
+              Fill demo credentials
+            </button>
           <button style={styles.btn} type="submit" disabled={loading}>
             {loading ? 'Please wait...' : mode === 'login' ? 'Sign In' : 'Create Account'}
           </button>

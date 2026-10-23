@@ -25,16 +25,19 @@ router.get(
     const limit = req.query.limit || 20;
     const offset = (page - 1) * limit;
     try {
-      const countResult = await query('SELECT COUNT(*) FROM homes WHERE user_id = $1', [req.user.id]);
+      const q = typeof req.query.q === 'string' ? req.query.q.trim() : (typeof req.query.search === 'string' ? req.query.search.trim() : '');
+      const countParams = q ? [req.user.id, `%${q}%`] : [req.user.id];
+      // count query uses its own param order; keep address filter consistent below
+      const countResult = await query(`SELECT COUNT(*) FROM homes h WHERE h.user_id = $1${q ? ' AND h.address ILIKE $2' : ''}`, countParams);
       const total = parseInt(countResult.rows[0].count);
 
       const result = await query(
         `SELECT h.*,
            (SELECT COUNT(*) FROM assessments a WHERE a.home_id = h.id) AS assessment_count,
            (SELECT status FROM assessments a WHERE a.home_id = h.id ORDER BY a.created_at DESC LIMIT 1) AS latest_assessment_status
-         FROM homes h WHERE h.user_id = $1 ORDER BY h.created_at DESC
-         LIMIT $2 OFFSET $3`,
-        [req.user.id, limit, offset]
+         FROM homes h WHERE h.user_id = $1${q ? ' AND h.address ILIKE $2' : ''} ORDER BY h.created_at DESC
+         LIMIT ${q ? '$3' : '$2'} OFFSET ${q ? '$4' : '$3'}`,
+        q ? [req.user.id, `%${q}%`, limit, offset] : [req.user.id, limit, offset]
       );
       return res.json({
         data: result.rows,

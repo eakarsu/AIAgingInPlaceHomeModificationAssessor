@@ -46,6 +46,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/runtime-ai', aiRateLimiter, require('./routes/runtimeAi'));
 app.use('/api/homes', homesRoutes);
+app.use('/api/feature-pack', require('./routes/featurePack'));
 app.use('/api/assessments', assessmentsRoutes);
 app.use('/api/modifications', modificationsRoutes);
 app.use('/api/contractors', contractorsRoutes);
